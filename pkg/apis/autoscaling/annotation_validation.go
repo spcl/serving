@@ -65,7 +65,7 @@ func ValidateAnnotations(ctx context.Context, config *autoscalerconfig.Config, a
 
 func validateClass(m map[string]string) *apis.FieldError {
 	if k, v, ok := ClassAnnotation.Get(m); ok {
-		if strings.HasSuffix(v, domain) && v != KPA && v != HPA {
+		if strings.HasSuffix(v, domain) && v != KPA && v != HPA && v != PPA {
 			return apis.ErrInvalidValue(v, k)
 		}
 	}
