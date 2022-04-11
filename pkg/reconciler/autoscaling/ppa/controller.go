@@ -2,8 +2,8 @@ package ppa
 
 import (
 	"context"
-	"k8s.io/client-go/tools/cache"
-	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
+	filteredpodinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/pod/filtered"
+	"knative.dev/serving/pkg/apis/serving"
 	"knative.dev/serving/pkg/client/injection/ducks/autoscaling/v1alpha1/podscalable"
 
 	networkingclient "knative.dev/networking/pkg/client/injection/client"
@@ -39,11 +39,7 @@ func NewController(
 	sksInformer := sksinformer.Get(ctx)
 	metricInformer := metricinformer.Get(ctx)
 	psInformerFactory := podscalable.Get(ctx)
-	// ctx = filteredinformerfactory.WithSelectors(ctx, serving.RevisionUID)
-
-	// cfg := injection.ParseAndGetRESTConfigOrDie()
-	// ctx, _ = injection.Default.SetupInformers(ctx, cfg)
-	// podsInformer := filteredpodinformer.Get(ctx, serving.RevisionUID)
+	podsInformer := filteredpodinformer.Get(ctx, serving.RevisionUID)
 
 	c := &Reconciler{
 		Base: &areconciler.Base{
@@ -52,7 +48,7 @@ func NewController(
 			SKSLister:        sksInformer.Lister(),
 			MetricLister:     metricInformer.Lister(),
 		},
-		// podsLister: podsInformer.Lister(),
+		podsLister: podsInformer.Lister(),
 	}
 
 	impl := pareconciler.NewImpl(ctx, c, autoscaling.PPA, func(impl *controller.Impl) controller.Options {
@@ -73,18 +69,18 @@ func NewController(
 	// And here we should set up some event handlers
 	logger.Info("Setting up PPA Class event handlers")
 
-	paInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-		FilterFunc: onlyPPAClass,
-		Handler:    controller.HandleAll(impl.Enqueue),
-	})
-
-	onlyPAControlled := controller.FilterController(&autoscalingv1alpha1.PodAutoscaler{})
-	handleMatchingControllers := cache.FilteringResourceEventHandler{
-		FilterFunc: pkgreconciler.ChainFilterFuncs(onlyPPAClass, onlyPAControlled),
-		Handler:    controller.HandleAll(impl.EnqueueControllerOf),
-	}
-	sksInformer.Informer().AddEventHandler(handleMatchingControllers)
-	metricInformer.Informer().AddEventHandler(handleMatchingControllers)
+	//paInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+	//	FilterFunc: onlyPPAClass,
+	//	Handler:    controller.HandleAll(impl.Enqueue),
+	//})
+	//
+	//onlyPAControlled := controller.FilterController(&autoscalingv1alpha1.PodAutoscaler{})
+	//handleMatchingControllers := cache.FilteringResourceEventHandler{
+	//	FilterFunc: pkgreconciler.ChainFilterFuncs(onlyPPAClass, onlyPAControlled),
+	//	Handler:    controller.HandleAll(impl.EnqueueControllerOf),
+	//}
+	//sksInformer.Informer().AddEventHandler(handleMatchingControllers)
+	//metricInformer.Informer().AddEventHandler(handleMatchingControllers)
 
 	// Watch the knative pods.
 	//podsInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{

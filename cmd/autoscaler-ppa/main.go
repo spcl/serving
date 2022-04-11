@@ -17,6 +17,9 @@ limitations under the License.
 package main
 
 import (
+	filteredinformerfactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
+	"knative.dev/pkg/signals"
+	"knative.dev/serving/pkg/apis/serving"
 	// The set of controllers this controller process runs.
 	"knative.dev/serving/pkg/reconciler/autoscaling/ppa"
 
@@ -25,5 +28,7 @@ import (
 )
 
 func main() {
-	sharedmain.Main("ppaautoscaler", ppa.NewController)
+	ctx := signals.NewContext()
+	ctx = filteredinformerfactory.WithSelectors(ctx, serving.RevisionUID)
+	sharedmain.MainWithContext(ctx, "ppaautoscaler", ppa.NewController)
 }

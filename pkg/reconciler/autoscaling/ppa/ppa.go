@@ -7,12 +7,15 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"knative.dev/pkg/logging"
+	"knative.dev/pkg/ptr"
 	pkgreconciler "knative.dev/pkg/reconciler"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
+	"knative.dev/serving/pkg/apis/serving"
 	pareconciler "knative.dev/serving/pkg/client/injection/reconciler/autoscaling/v1alpha1/podautoscaler"
 	areconciler "knative.dev/serving/pkg/reconciler/autoscaling"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
 	anames "knative.dev/serving/pkg/reconciler/autoscaling/resources/names"
+	resourceutil "knative.dev/serving/pkg/resources"
 	"time"
 )
 
@@ -46,19 +49,18 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 		return fmt.Errorf("error scaling target: %w", err)
 	}
 
-	logger.Infof("Want %d pods", want)
-
 	// Compare the desired and observed resources to determine our situation.
-	//podCounter := resourceutil.NewPodAccessor(c.podsLister, pa.Namespace, pa.Labels[serving.RevisionLabelKey])
-	//ready, _, _, _, err := podCounter.PodCountsByState()
-	//if err != nil {
-	//	return fmt.Errorf("error scaling target: %w", err)
-	//}
+	podCounter := resourceutil.NewPodAccessor(c.podsLister, pa.Namespace, pa.Labels[serving.RevisionLabelKey])
+	ready, _, _, _, err := podCounter.PodCountsByState()
+	if err != nil {
+		return fmt.Errorf("error scaling target: %w", err)
+	}
+
+	logger.Infof("Want %d pods and %d is ready", want, ready)
 
 	// Update status
-	// pa.Status.DesiredScale = ptr.Int32(2)
-	// pa.Status.ActualScale = ptr.Int32(int32(ready))
-	ready := 2
+	pa.Status.DesiredScale = ptr.Int32(2)
+	pa.Status.ActualScale = ptr.Int32(int32(ready))
 	if ready == 2 {
 		pa.Status.MarkActive()
 	} else {
@@ -80,10 +82,4 @@ func intMax(a, b int32) int32 {
 		return b
 	}
 	return a
-}
-
-func computeStatus(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler, logger *zap.SugaredLogger) {
-	// reportMetrics(pa, pc)
-	// computeActiveCondition(ctx, pa, pc)
-	logger.Debugf("PA Status after reconcile: %#v", pa.Status.Status)
 }
