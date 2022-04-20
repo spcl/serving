@@ -6,6 +6,7 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/errors"
 	corev1listers "k8s.io/client-go/listers/core/v1"
+	nv1alpha1 "knative.dev/networking/pkg/apis/networking/v1alpha1"
 	"knative.dev/pkg/logging"
 	"knative.dev/pkg/ptr"
 	pkgreconciler "knative.dev/pkg/reconciler"
@@ -19,7 +20,7 @@ import (
 	"time"
 )
 
-// Reconciler implements the control loop for the HPA resources.
+// Reconciler implements the control loop for the PPA resources.
 type Reconciler struct {
 	*areconciler.Base
 
@@ -44,27 +45,50 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 		logger.Warnw("Error retrieving SKS for Scaler", zap.Error(err))
 	}
 
-	want, err := c.scaler.scale(ctx, pa, sks, 2)
+	desiredScale := int32(2)
+	want, err := c.scaler.scale(ctx, pa, sks, desiredScale)
 	if err != nil {
 		return fmt.Errorf("error scaling target: %w", err)
 	}
 
 	// Compare the desired and observed resources to determine our situation.
 	podCounter := resourceutil.NewPodAccessor(c.podsLister, pa.Namespace, pa.Labels[serving.RevisionLabelKey])
-	ready, _, _, _, err := podCounter.PodCountsByState()
+	ready, notReady, pending, terminating, err := podCounter.PodCountsByState()
 	if err != nil {
 		return fmt.Errorf("error scaling target: %w", err)
 	}
 
-	logger.Infof("Want %d pods and %d is ready", want, ready)
+	logger.Infof("Want %d pods and %d is ready, %d is not ready, %d is pending, %d is terminating", want, ready, notReady, pending, terminating)
+
+	mode := nv1alpha1.SKSOperationModeServe // This could also be proxy (if scale is 0)
+	numActivators := int32(1)
+	sks, err = c.ReconcileSKS(ctx, pa, mode, numActivators)
+	if err != nil {
+		return fmt.Errorf("error reconciling SKS: %w", err)
+	}
+	// Propagate service name.
+	pa.Status.ServiceName = sks.Status.ServiceName
+	logger.Infof("Propagate service name: %v", pa.Status.ServiceName)
+
+	// If SKS is not ready — ensure we're not becoming ready.
+	if sks.IsReady() {
+		logger.Debug("SKS is ready, marking SKS status ready")
+		pa.Status.MarkSKSReady()
+	} else {
+		logger.Debug("SKS is not ready, marking SKS status not ready")
+		pa.Status.MarkSKSNotReady(sks.Status.GetCondition(nv1alpha1.ServerlessServiceConditionReady).GetMessage())
+	}
 
 	// Update status
-	pa.Status.DesiredScale = ptr.Int32(2)
+	pa.Status.DesiredScale = ptr.Int32(desiredScale)
 	pa.Status.ActualScale = ptr.Int32(int32(ready))
-	if ready == 2 {
+	if int32(ready) == desiredScale && sks.IsReady() {
+		pa.Status.MarkScaleTargetInitialized()
 		pa.Status.MarkActive()
+		logger.Infof("PA (%v) is set to active", pa.Name)
 	} else {
 		pa.Status.MarkActivating("Queued", "Requests to the target are being buffered as resources are provisioned.")
+		logger.Infof("PA (%v) is set to activating", pa.Name)
 	}
 	return nil
 }
