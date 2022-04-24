@@ -66,9 +66,15 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 	if err != nil {
 		return fmt.Errorf("error reconciling SKS: %w", err)
 	}
+	pa.Status.MetricsServiceName = sks.Status.PrivateServiceName
+	logger.Infof("MetricsServiceName: %s", pa.Status.MetricsServiceName)
+
 	// Propagate service name.
 	pa.Status.ServiceName = sks.Status.ServiceName
 	logger.Infof("Propagate service name: %v", pa.Status.ServiceName)
+	if err := c.ReconcileMetric(ctx, pa, pa.Status.MetricsServiceName); err != nil {
+		return fmt.Errorf("error reconciling Metric: %w", err)
+	}
 
 	// If SKS is not ready — ensure we're not becoming ready.
 	if sks.IsReady() {

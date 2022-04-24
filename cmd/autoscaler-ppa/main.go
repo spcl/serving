@@ -18,6 +18,7 @@ package main
 
 import (
 	filteredinformerfactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
+	"knative.dev/pkg/injection"
 	"knative.dev/pkg/signals"
 	"knative.dev/serving/pkg/apis/serving"
 	// The set of controllers this controller process runs.
@@ -27,8 +28,14 @@ import (
 	"knative.dev/pkg/injection/sharedmain"
 )
 
+var ctors = []injection.ControllerConstructor{
+	ppa.NewController,
+	ppa.NewMetricController,
+}
+
 func main() {
 	ctx := signals.NewContext()
 	ctx = filteredinformerfactory.WithSelectors(ctx, serving.RevisionUID)
-	sharedmain.MainWithContext(ctx, "ppaautoscaler", ppa.NewController)
+
+	sharedmain.MainWithContext(ctx, "ppaautoscaler", ctors...)
 }
