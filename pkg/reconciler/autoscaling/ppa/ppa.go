@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	nv1alpha1 "knative.dev/networking/pkg/apis/networking/v1alpha1"
@@ -12,9 +13,12 @@ import (
 	pkgreconciler "knative.dev/pkg/reconciler"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving"
+	"knative.dev/serving/pkg/autoscaler/metrics"
+	"knative.dev/serving/pkg/autoscaler/scaling"
 	pareconciler "knative.dev/serving/pkg/client/injection/reconciler/autoscaling/v1alpha1/podautoscaler"
 	areconciler "knative.dev/serving/pkg/reconciler/autoscaling"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
+	"knative.dev/serving/pkg/reconciler/autoscaling/kpa/resources"
 	anames "knative.dev/serving/pkg/reconciler/autoscaling/resources/names"
 	resourceutil "knative.dev/serving/pkg/resources"
 	"time"
@@ -26,6 +30,9 @@ type Reconciler struct {
 
 	podsLister corev1listers.PodLister
 	scaler     *scaler
+	collector  *metrics.FullMetricCollector
+	//deciders   Deciders
+	deciders resources.Deciders
 }
 
 // Check that our Reconciler implements pareconciler.Interface
@@ -38,18 +45,17 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 
 	logger := logging.FromContext(ctx)
 
-	logger.Info("PPA ReconcileKind")
-	sksName := anames.SKS(pa.Name)
-	sks, err := c.SKSLister.ServerlessServices(pa.Namespace).Get(sksName)
-	if err != nil && !errors.IsNotFound(err) {
-		logger.Warnw("Error retrieving SKS for Scaler", zap.Error(err))
-	}
-
-	desiredScale := int32(2)
-	want, err := c.scaler.scale(ctx, pa, sks, desiredScale)
-	if err != nil {
-		return fmt.Errorf("error scaling target: %w", err)
-	}
+	decider, err := c.reconcileDecider(ctx, pa)
+	// metricKey := types.NamespacedName{Namespace: pa.Namespace, Name: pa.Name}
+	//logger.Infof("Decider wants %d scale", decider.Status.DesiredScale)
+	//logger.Infof("Trying to get metrics for key: %v", metricKey)
+	//stableVal, panicVal, err := c.collector.StableAndPanicConcurrency(metricKey, time.Now())
+	//if err != nil {
+	//	logger.Errorf("Failed to retrieve data from collector, err: %v", err)
+	//} else {
+	//	logger.Infof("stable: %f, panic, %f", stableVal, panicVal)
+	//}
+	desiredScale := decider.Status.DesiredScale
 
 	// Compare the desired and observed resources to determine our situation.
 	podCounter := resourceutil.NewPodAccessor(c.podsLister, pa.Namespace, pa.Labels[serving.RevisionLabelKey])
@@ -58,20 +64,43 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 		return fmt.Errorf("error scaling target: %w", err)
 	}
 
-	logger.Infof("Want %d pods and %d is ready, %d is not ready, %d is pending, %d is terminating", want, ready, notReady, pending, terminating)
+	if ready >= 1 && !pa.Status.IsScaleTargetInitialized() {
+		pa.Status.MarkScaleTargetInitialized()
+	}
+
+	//if int32(ready) == desiredScale {
+	//	pa.Status.MarkActive()
+	//	return nil
+	//} else if int32(ready+notReady+pending) >= desiredScale {
+	//	pa.Status.MarkActivating("Queued", "Requests to the target are being buffered as resources are provisioned.")
+	//	return nil
+	//}
+
+	sksName := anames.SKS(pa.Name)
+	sks, err := c.SKSLister.ServerlessServices(pa.Namespace).Get(sksName)
+	if err != nil && !errors.IsNotFound(err) {
+		logger.Warnw("Error retrieving SKS for Scaler", zap.Error(err))
+	}
+
+	want, err := c.scaler.scale(ctx, pa, sks, desiredScale)
+	if err != nil {
+		return fmt.Errorf("error scaling target: %w", err)
+	}
+
+	logger.Infof("PPA want %d pods and %d is ready, %d is not ready, %d is pending, %d is terminating", want, ready, notReady, pending, terminating)
 
 	mode := nv1alpha1.SKSOperationModeServe // This could also be proxy (if scale is 0)
-	numActivators := int32(1)
+	numActivators := int32(1)               // I guess?
 	sks, err = c.ReconcileSKS(ctx, pa, mode, numActivators)
 	if err != nil {
 		return fmt.Errorf("error reconciling SKS: %w", err)
 	}
 	pa.Status.MetricsServiceName = sks.Status.PrivateServiceName
-	logger.Infof("MetricsServiceName: %s", pa.Status.MetricsServiceName)
+	// logger.Infof("MetricsServiceName: %s", pa.Status.MetricsServiceName)
 
 	// Propagate service name.
 	pa.Status.ServiceName = sks.Status.ServiceName
-	logger.Infof("Propagate service name: %v", pa.Status.ServiceName)
+	// logger.Infof("Propagate service name: %v", pa.Status.ServiceName)
 	if err := c.ReconcileMetric(ctx, pa, pa.Status.MetricsServiceName); err != nil {
 		return fmt.Errorf("error reconciling Metric: %w", err)
 	}
@@ -89,7 +118,6 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 	pa.Status.DesiredScale = ptr.Int32(desiredScale)
 	pa.Status.ActualScale = ptr.Int32(int32(ready))
 	if int32(ready) == desiredScale && sks.IsReady() {
-		pa.Status.MarkScaleTargetInitialized()
 		pa.Status.MarkActive()
 		logger.Infof("PA (%v) is set to active", pa.Name)
 	} else {
@@ -112,4 +140,31 @@ func intMax(a, b int32) int32 {
 		return b
 	}
 	return a
+}
+
+func (c *Reconciler) reconcileDecider(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler) (*scaling.Decider, error) {
+	desiredDecider := resources.MakeDecider(pa, config.FromContext(ctx).Autoscaler)
+	decider, err := c.deciders.Get(ctx, desiredDecider.Namespace, desiredDecider.Name)
+	if errors.IsNotFound(err) {
+		decider, err = c.deciders.Create(ctx, desiredDecider)
+		if err != nil {
+			return nil, fmt.Errorf("error creating Decider: %w", err)
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("error fetching Decider: %w", err)
+	}
+
+	// Ignore status when reconciling
+	desiredDecider.Status = decider.Status
+	if !equality.Semantic.DeepEqual(desiredDecider, decider) {
+		decider, err = c.deciders.Update(ctx, desiredDecider)
+		if err != nil {
+			return nil, fmt.Errorf("error updating decider: %w", err)
+		}
+	}
+
+	if decider.Status.DesiredScale == -1 {
+		decider.Status.DesiredScale = 1
+	}
+	return decider, nil
 }

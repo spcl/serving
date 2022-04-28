@@ -140,6 +140,8 @@ func main() {
 
 	protoStatReporter := queue.NewProtobufStatsReporter(env.ServingPod, reportingPeriod)
 
+	customStatReporter := queue.NewCustomStatsReporter(env.ServingPod, reportingPeriod)
+
 	reportTicker := time.NewTicker(reportingPeriod)
 	defer reportTicker.Stop()
 
@@ -149,6 +151,7 @@ func main() {
 			stat := stats.Report(now)
 			promStatReporter.Report(stat)
 			protoStatReporter.Report(stat)
+			customStatReporter.Report()
 		}
 	}()
 
@@ -164,9 +167,10 @@ func main() {
 	}
 	mainServer, drain := buildServer(ctx, env, probe, stats, logger, concurrencyendpoint)
 	servers := map[string]*http.Server{
-		"main":    mainServer,
-		"admin":   buildAdminServer(logger, drain),
-		"metrics": buildMetricsServer(promStatReporter, protoStatReporter),
+		"main":           mainServer,
+		"admin":          buildAdminServer(logger, drain),
+		"metrics":        buildMetricsServer(promStatReporter, protoStatReporter),
+		"custom_metrics": buildCustomMetricsServer(customStatReporter),
 	}
 	if env.EnableProfiling {
 		servers["profile"] = profiling.NewServer(profiling.NewHandler(logger, true))
@@ -365,6 +369,15 @@ func buildMetricsServer(promStatReporter *queue.PrometheusStatsReporter, protobu
 	metricsMux.Handle("/metrics", queue.NewStatsHandler(promStatReporter, protobufStatReporter))
 	return &http.Server{
 		Addr:    ":" + strconv.Itoa(networking.AutoscalingQueueMetricsPort),
+		Handler: metricsMux,
+	}
+}
+
+func buildCustomMetricsServer(statReporter *queue.CustomStatsReporter) *http.Server {
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/custom_metrics", statReporter)
+	return &http.Server{
+		Addr:    ":" + strconv.Itoa(networking.AutoscalingQueueCustomMetricsPort),
 		Handler: metricsMux,
 	}
 }
