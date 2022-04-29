@@ -37,7 +37,7 @@ type FullCollector interface {
 	// it already exist.
 	CreateOrUpdate(metric *autoscalingv1alpha1.Metric) error
 	// Record allows stats to be captured that came from outside the Collector.
-	Record(key types.NamespacedName, now time.Time, stat CustomStat)
+	Record(key types.NamespacedName, now time.Time, stat *[]CustomStat)
 	// Delete deletes a Metric and halts collection.
 	Delete(string, string)
 	// Watch registers a singleton function to call when a specific collector's status changes.
@@ -46,7 +46,7 @@ type FullCollector interface {
 }
 
 type CustomMetricClient interface {
-	LatestCustomStats(key types.NamespacedName) (CustomStat, error)
+	LatestCustomStats(key types.NamespacedName) (*[]CustomStat, error)
 }
 
 // FullMetricCollector manages collection of metrics for many entities.
@@ -63,13 +63,13 @@ type FullMetricCollector struct {
 	watcher      func(types.NamespacedName)
 }
 
-func (c *FullMetricCollector) LatestCustomStats(key types.NamespacedName) (CustomStat, error) {
+func (c *FullMetricCollector) LatestCustomStats(key types.NamespacedName) (*[]CustomStat, error) {
 	c.collectionsMutex.RLock()
 	defer c.collectionsMutex.RUnlock()
 
 	collection, exists := c.collections[key]
 	if !exists {
-		return emptyCustomStat, ErrNotCollecting
+		return nil, ErrNotCollecting
 	}
 
 	return collection.stat, nil
@@ -132,7 +132,7 @@ func (c *FullMetricCollector) Delete(namespace, name string) {
 }
 
 // Record records a stat that's been generated outside of the metric collector.
-func (c *FullMetricCollector) Record(key types.NamespacedName, now time.Time, stat CustomStat) {
+func (c *FullMetricCollector) Record(key types.NamespacedName, now time.Time, stat *[]CustomStat) {
 	c.collectionsMutex.RLock()
 	defer c.collectionsMutex.RUnlock()
 
@@ -172,7 +172,7 @@ type (
 		metric *autoscalingv1alpha1.Metric
 
 		// Fields relevant to metric collection in general.
-		stat CustomStat
+		stat *[]CustomStat
 
 		// Fields relevant for metric scraping specifically.
 		scraper FullStatsScraper
@@ -230,14 +230,13 @@ func newCustomCollection(metric *autoscalingv1alpha1.Metric, scraper FullStatsSc
 				}
 
 				stat, err := scraper.Scrape(c.currentMetric().Spec.StableWindow)
-				logger.Infof("Got new new stat from scraper with value: %v", stat)
 				if err != nil {
 					logger.Errorw("Failed to scrape metrics", zap.Error(err))
 				}
 				if c.updateLastError(err) {
 					callback(key)
 				}
-				if len(stat.Values) > 0 {
+				if stat != nil {
 					c.record(clock.Now(), stat)
 				}
 			}
@@ -290,7 +289,7 @@ func (c *customCollection) lastError() error {
 }
 
 // record adds a stat to the current collection.
-func (c *customCollection) record(now time.Time, stat CustomStat) {
+func (c *customCollection) record(now time.Time, stat *[]CustomStat) {
 	// Proxied requests have been counted at the activator. Subtract
 	// them to avoid double counting.
 	c.stat = stat

@@ -17,15 +17,24 @@ limitations under the License.
 package main
 
 import (
+	"go.uber.org/zap"
 	filteredinformerfactory "knative.dev/pkg/client/injection/kube/informers/factory/filtered"
 	"knative.dev/pkg/injection"
+	"knative.dev/pkg/logging"
+	"knative.dev/pkg/metrics"
 	"knative.dev/pkg/signals"
 	"knative.dev/serving/pkg/apis/serving"
+	"log"
+
 	// The set of controllers this controller process runs.
 	"knative.dev/serving/pkg/reconciler/autoscaling/ppa"
 
 	// This defines the shared main for injected controllers.
 	"knative.dev/pkg/injection/sharedmain"
+)
+
+const (
+	component = "ppaautoscaler"
 )
 
 var ctors = []injection.ControllerConstructor{
@@ -37,5 +46,25 @@ func main() {
 	ctx := signals.NewContext()
 	ctx = filteredinformerfactory.WithSelectors(ctx, serving.RevisionUID)
 
-	sharedmain.MainWithContext(ctx, "ppaautoscaler", ctors...)
+	ctx, startInformers := injection.EnableInjectionOrDie(ctx, nil)
+
+	// Set up our logger.
+	loggingConfig, err := sharedmain.GetLoggingConfig(ctx)
+	if err != nil {
+		log.Fatal("Error loading/parsing logging configuration: ", err)
+	}
+	logger, _ := logging.NewLoggerFromConfig(loggingConfig, component)
+	defer flush(logger)
+	ctx = logging.WithLogger(ctx, logger)
+
+	ctx = ppa.WithCollector(ctx)
+
+	startInformers()
+
+	sharedmain.MainWithConfig(ctx, component, injection.GetConfig(ctx), ctors...)
+}
+
+func flush(logger *zap.SugaredLogger) {
+	logger.Sync()
+	metrics.FlushExporter()
 }

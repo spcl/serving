@@ -59,7 +59,7 @@ func init() {
 type FullStatsScraper interface {
 	// Scrape scrapes the Revision queue metric endpoint. The duration is used
 	// to cutoff young pods, whose stats might skew lower.
-	Scrape(time.Duration) (CustomStat, error)
+	Scrape(time.Duration) (*[]CustomStat, error)
 }
 
 // customScrapeClient defines the interface for collecting Revision metrics for a given
@@ -108,12 +108,12 @@ func NewCustomStatsScraper(
 
 // Scrape calls the destination service then sends it
 // to the given stats channel.
-func (s *customServiceScraper) Scrape(window time.Duration) (stat CustomStat, err error) {
+func (s *customServiceScraper) Scrape(window time.Duration) (stat *[]CustomStat, err error) {
 	startTime := time.Now()
 	defer func() {
 		// No errors and an empty stat? We didn't scrape at all because
 		// we're scaled to 0.
-		if len(stat.Values) == 0 && err == nil {
+		if stat == nil && err == nil {
 			return
 		}
 		scrapeTime := time.Since(startTime)
@@ -122,29 +122,32 @@ func (s *customServiceScraper) Scrape(window time.Duration) (stat CustomStat, er
 	return s.scrapePods(window)
 }
 
-func (s *customServiceScraper) scrapePods(window time.Duration) (CustomStat, error) {
-	s.logger.Info("scrape pods")
+func (s *customServiceScraper) scrapePods(window time.Duration) (*[]CustomStat, error) {
 	pods, youngPods, err := s.podAccessor.PodIPsSplitByAge(window, time.Now())
 	if err != nil {
 		s.logger.Infow("Error querying pods by age", zap.Error(err))
-		return emptyCustomStat, err
+		return nil, err
 	}
 	lp := len(pods)
 	lyp := len(youngPods)
 	// s.logger.Debugf("|OldPods| = %d, |YoungPods| = %d", lp, lyp)
 	total := lp + lyp
 	if total == 0 {
-		return emptyCustomStat, nil
+		return nil, nil
 	}
 
-	results := make(chan CustomStat, total)
-	// s.logger.Infof("Try to scrape %d pods", total)
+	if lp == 0 && lyp > 0 {
+		s.logger.Warnf("Did not scrape, waiting for %d young pods", lyp)
+	}
+
+	resultArr := make([]CustomStat, lp)
 
 	grp, egCtx := errgroup.WithContext(context.Background())
 	idx := atomic.NewInt32(-1)
+	succesCount := atomic.NewInt32(0)
 	var sawNonMeshError atomic.Bool
-	// Start |total| threads to scan in parallel.
-	for i := 0; i < total; i++ {
+	// Start |lp| threads to scan in parallel.
+	for i := 0; i < lp; i++ {
 		grp.Go(func() error {
 			// If a given pod failed to scrape, we want to continue
 			// scanning pods down the line.
@@ -152,7 +155,7 @@ func (s *customServiceScraper) scrapePods(window time.Duration) (CustomStat, err
 				// Acquire next pod.
 				myIdx := int(idx.Inc())
 				// All out?
-				if myIdx >= len(pods) {
+				if myIdx >= lp {
 					return errPodsExhausted
 				}
 
@@ -171,18 +174,9 @@ func (s *customServiceScraper) scrapePods(window time.Duration) (CustomStat, err
 				}
 
 				stat, err := s.directClient.Do(req)
-				//stat := CustomStat{
-				//	PodName: "ASD",
-				//	Values: []*CustomStatValue{
-				//		{StatName: "custom_stat1", StatValue: 2.3},
-				//		{StatName: "custom_stat2", StatValue: 3.2},
-				//		{StatName: "custom_stat3", StatValue: 1.3},
-				//		{StatName: "custom_stat4", StatValue: 4.5},
-				//	},
-				//}
-				// s.logger.Infof("Scrape endpoint: %s (%s) returned: %f %f", target, stat.PodName, stat.RequestCount, stat.ProxiedRequestCount)
 				if err == nil {
-					results <- stat
+					resultArr[myIdx] = stat
+					succesCount.Inc()
 					return nil
 				}
 
@@ -196,29 +190,26 @@ func (s *customServiceScraper) scrapePods(window time.Duration) (CustomStat, err
 	}
 
 	err = grp.Wait()
-	close(results)
-	s.logger.Infof("(Custom) Scraped %d", len(results))
 
 	// We only get here if one of the scrapers failed to scrape
 	// at least one pod.
 	if err != nil {
 		// Got some (but not enough) successful pods.
-		if len(results) > 0 {
+		if succesCount.Load() > 0 {
 			s.logger.Warnf("Too many pods failed scraping for meaningful interpolation error: %v", err)
-			return emptyCustomStat, errPodsExhausted
+			return nil, errPodsExhausted
 		}
 		// We didn't get any pods, but we don't want to fall back to service
 		// scraping because we saw an error which was not mesh-related.
 		if sawNonMeshError.Load() {
 			s.logger.Warn("0 pods scraped, but did not see a mesh-related error")
-			return emptyCustomStat, errPodsExhausted
+			return nil, errPodsExhausted
 		}
 		// No pods, and we only saw mesh-related errors, so infer that mesh must be
 		// enabled and fall back to service scraping.
 		s.logger.Warn("0 pods were successfully scraped out of ", strconv.Itoa(len(pods)))
-		return emptyCustomStat, errDirectScrapingNotAvailable
+		return nil, errDirectScrapingNotAvailable
 	}
 
-	return <-results, nil
-	//return computeAverages(results, float64(total), float64(total)), nil
+	return &resultArr, nil
 }

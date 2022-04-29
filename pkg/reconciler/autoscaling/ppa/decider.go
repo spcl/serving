@@ -45,6 +45,10 @@ func (d *Decider) Scale(logger *zap.SugaredLogger, t time.Time) scaling.ScaleRes
 	//} else {
 	//	logger.Infof("pod count: %d, (%v)", d.currentPodCount, err)
 	//}
+	stats, err := d.collector.LatestCustomStats(d.key)
+	if err == nil {
+		logger.Infof("Scale based on: %v", stats)
+	}
 	newScale := int32(6) //d.currentPodCount //(int32(t.Minute()/4))%10 + 1
 	return scaling.ScaleResult{
 		DesiredPodCount:     newScale,
