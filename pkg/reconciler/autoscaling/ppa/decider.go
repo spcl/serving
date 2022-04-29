@@ -45,11 +45,12 @@ func (d *Decider) Scale(logger *zap.SugaredLogger, t time.Time) scaling.ScaleRes
 	//} else {
 	//	logger.Infof("pod count: %d, (%v)", d.currentPodCount, err)
 	//}
+	newScale := int32(1) //d.currentPodCount //(int32(t.Minute()/4))%10 + 1
 	stats, err := d.collector.LatestCustomStats(d.key)
-	if err == nil {
+	if err == nil && stats != nil && len(*stats) > 0 {
 		logger.Infof("Scale based on: %v", stats)
+		newScale = int32(6)
 	}
-	newScale := int32(6) //d.currentPodCount //(int32(t.Minute()/4))%10 + 1
 	return scaling.ScaleResult{
 		DesiredPodCount:     newScale,
 		ExcessBurstCapacity: 1,
@@ -58,7 +59,6 @@ func (d *Decider) Scale(logger *zap.SugaredLogger, t time.Time) scaling.ScaleRes
 }
 
 func (d *Decider) Update(spec *scaling.DeciderSpec) {
-	//TODO implement me
 	d.logger.Warnf("Need to update decider with: %v", spec)
 }
 

@@ -120,34 +120,48 @@ func NewController(
 		FilterFunc: onlyPPAClass,
 		// Handler:    controller.HandleAll(impl.Enqueue),
 		Handler: controller.HandleAll(func(obj interface{}) {
-			logger.Infof("pa Informer called the handler")
+			// logger.Infof("pa Informer called the handler")
 			impl.Enqueue(obj)
 		}),
 	})
 
-	//onlyPAControlled := controller.FilterController(&autoscalingv1alpha1.PodAutoscaler{})
-	//handleMatchingControllers := cache.FilteringResourceEventHandler{
+	onlyPAControlled := controller.FilterController(&autoscalingv1alpha1.PodAutoscaler{})
+	handleMatchingControllers := cache.FilteringResourceEventHandler{
+		FilterFunc: pkgreconciler.ChainFilterFuncs(onlyPPAClass, onlyPAControlled),
+		Handler: controller.HandleAll(func(obj interface{}) {
+			// logger.Info("SKS event")
+			impl.EnqueueControllerOf(obj)
+		}),
+	}
+	sksInformer.Informer().AddEventHandler(handleMatchingControllers)
+	//handleMatchingControllersNoAction := cache.FilteringResourceEventHandler{
 	//	FilterFunc: pkgreconciler.ChainFilterFuncs(onlyPPAClass, onlyPAControlled),
 	//	Handler: controller.HandleAll(func(obj interface{}) {
-	//		logger.Info("SKS or metricInformer event")
+	//		logger.Info("metric event")
 	//		impl.EnqueueControllerOf(obj)
 	//	}),
 	//}
-	//sksInformer.Informer().AddEventHandler(handleMatchingControllers)
-	//metricInformer.Informer().AddEventHandler(handleMatchingControllers)
+	//metricInformer.Informer().AddEventHandler(handleMatchingControllersNoAction)
 
 	// Watch the knative pods.
-	//podsInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
-	//	FilterFunc: pkgreconciler.LabelExistsFilterFunc(serving.RevisionLabelKey),
-	//	Handler: controller.HandleAll(func(obj interface{}) {
-	//		logger.Info("podsInformer event")
-	//		impl.EnqueueLabelOfNamespaceScopedResource("", serving.RevisionLabelKey)
-	//	}),
-	//})
+	handlerFunc := impl.EnqueueLabelOfNamespaceScopedResource("", serving.RevisionLabelKey)
+	podsInformer.Informer().AddEventHandler(cache.FilteringResourceEventHandler{
+		FilterFunc: pkgreconciler.LabelExistsFilterFunc(serving.RevisionLabelKey),
+		Handler: controller.HandleAll(func(obj interface{}) {
+			queueLen := impl.WorkQueue().Len()
+			// Only handle this if there are no other work items
+			if queueLen == 0 {
+				// logger.Infof("podsInformer event")
+				handlerFunc(obj)
+			} else {
+				logger.Debug("There are items in the work queue podsInformer was ignored")
+			}
+		}),
+	})
 
 	// Have the Deciders enqueue the PAs whose decisions have changed.
 	multiScaler.Watch(func(k types.NamespacedName) {
-		logger.Info("Decider queued PPA")
+		// logger.Info("Decider queued PPA")
 		impl.EnqueueKey(k)
 	})
 

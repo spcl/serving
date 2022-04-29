@@ -68,14 +68,6 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 		pa.Status.MarkScaleTargetInitialized()
 	}
 
-	//if int32(ready) == desiredScale {
-	//	pa.Status.MarkActive()
-	//	return nil
-	//} else if int32(ready+notReady+pending) >= desiredScale {
-	//	pa.Status.MarkActivating("Queued", "Requests to the target are being buffered as resources are provisioned.")
-	//	return nil
-	//}
-
 	sksName := anames.SKS(pa.Name)
 	sks, err := c.SKSLister.ServerlessServices(pa.Namespace).Get(sksName)
 	if err != nil && !errors.IsNotFound(err) {
@@ -96,11 +88,9 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 		return fmt.Errorf("error reconciling SKS: %w", err)
 	}
 	pa.Status.MetricsServiceName = sks.Status.PrivateServiceName
-	// logger.Infof("MetricsServiceName: %s", pa.Status.MetricsServiceName)
 
 	// Propagate service name.
 	pa.Status.ServiceName = sks.Status.ServiceName
-	// logger.Infof("Propagate service name: %v", pa.Status.ServiceName)
 	if err := c.ReconcileMetric(ctx, pa, pa.Status.MetricsServiceName); err != nil {
 		return fmt.Errorf("error reconciling Metric: %w", err)
 	}
@@ -119,10 +109,10 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 	pa.Status.ActualScale = ptr.Int32(int32(ready))
 	if int32(ready) == desiredScale && sks.IsReady() {
 		pa.Status.MarkActive()
-		logger.Infof("PA (%v) is set to active", pa.Name)
+		// logger.Infof("PA (%v) is set to active", pa.Name)
 	} else {
 		pa.Status.MarkActivating("Queued", "Requests to the target are being buffered as resources are provisioned.")
-		logger.Infof("PA (%v) is set to activating", pa.Name)
+		// logger.Infof("PA (%v) is set to activating", pa.Name)
 	}
 	return nil
 }

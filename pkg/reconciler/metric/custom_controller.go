@@ -18,7 +18,9 @@ package metric
 
 import (
 	"context"
+	"k8s.io/apimachinery/pkg/types"
 	"knative.dev/pkg/logging"
+	metricinformer "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/metric"
 
 	"knative.dev/serving/pkg/autoscaler/metrics"
 	metricreconciler "knative.dev/serving/pkg/client/injection/reconciler/autoscaling/v1alpha1/metric"
@@ -35,7 +37,7 @@ func NewCustomController(
 	collector metrics.FullCollector,
 ) *controller.Impl {
 	logger := logging.FromContext(ctx)
-	// metricInformer := metricinformer.Get(ctx)
+	metricInformer := metricinformer.Get(ctx)
 
 	logger.Info("New custom metric controller")
 
@@ -45,16 +47,16 @@ func NewCustomController(
 	impl := metricreconciler.NewImpl(ctx, c)
 
 	// Watch all the Metric objects.
-	//metricInformer.Informer().AddEventHandler(
-	//	controller.HandleAll(func(obj interface{}) {
-	//		logger.Info("Event by metric informer in metric controller")
-	//		impl.Enqueue(obj)
-	//	}))
-	//
-	//collector.Watch(func(name types.NamespacedName) {
-	//	logger.Info("Event by collector in metric controller")
-	//	impl.EnqueueKey(name)
-	//})
+	metricInformer.Informer().AddEventHandler(
+		controller.HandleAll(func(obj interface{}) {
+			logger.Info("Event by metric informer in metric controller")
+			impl.Enqueue(obj)
+		}))
+
+	collector.Watch(func(name types.NamespacedName) {
+		logger.Info("Event by collector in metric controller")
+		impl.EnqueueKey(name)
+	})
 
 	return impl
 }
