@@ -37,7 +37,7 @@ type FullCollector interface {
 	// it already exist.
 	CreateOrUpdate(metric *autoscalingv1alpha1.Metric) error
 	// Record allows stats to be captured that came from outside the Collector.
-	Record(key types.NamespacedName, now time.Time, stat *[]CustomStat)
+	Record(key types.NamespacedName, now time.Time, stat []CustomStat)
 	// Delete deletes a Metric and halts collection.
 	Delete(string, string)
 	// Watch registers a singleton function to call when a specific collector's status changes.
@@ -46,7 +46,7 @@ type FullCollector interface {
 }
 
 type CustomMetricClient interface {
-	LatestCustomStats(key types.NamespacedName) (*[]CustomStat, error)
+	LatestCustomStats(key types.NamespacedName) ([]CustomStat, error)
 }
 
 // FullMetricCollector manages collection of metrics for many entities.
@@ -63,7 +63,7 @@ type FullMetricCollector struct {
 	watcher      func(types.NamespacedName)
 }
 
-func (c *FullMetricCollector) LatestCustomStats(key types.NamespacedName) (*[]CustomStat, error) {
+func (c *FullMetricCollector) LatestCustomStats(key types.NamespacedName) ([]CustomStat, error) {
 	c.collectionsMutex.RLock()
 	defer c.collectionsMutex.RUnlock()
 
@@ -132,7 +132,7 @@ func (c *FullMetricCollector) Delete(namespace, name string) {
 }
 
 // Record records a stat that's been generated outside of the metric collector.
-func (c *FullMetricCollector) Record(key types.NamespacedName, now time.Time, stat *[]CustomStat) {
+func (c *FullMetricCollector) Record(key types.NamespacedName, now time.Time, stat []CustomStat) {
 	c.collectionsMutex.RLock()
 	defer c.collectionsMutex.RUnlock()
 
@@ -172,7 +172,7 @@ type (
 		metric *autoscalingv1alpha1.Metric
 
 		// Fields relevant to metric collection in general.
-		stat *[]CustomStat
+		stat []CustomStat
 
 		// Fields relevant for metric scraping specifically.
 		scraper FullStatsScraper
@@ -196,13 +196,17 @@ func (c *customCollection) getScraper() FullStatsScraper {
 
 // newCollection creates a new collection, which uses the given scraper to
 // collect stats every scrapeTickInterval.
-func newCustomCollection(metric *autoscalingv1alpha1.Metric, scraper FullStatsScraper, clock clock.Clock,
-	callback func(types.NamespacedName), logger *zap.SugaredLogger) *customCollection {
+func newCustomCollection(
+	metric *autoscalingv1alpha1.Metric,
+	scraper FullStatsScraper,
+	clock clock.Clock,
+	callback func(types.NamespacedName),
+	logger *zap.SugaredLogger) *customCollection {
 	c := &customCollection{
 		metric:  metric,
 		scraper: scraper,
-
-		stopCh: make(chan struct{}),
+		stat:    nil,
+		stopCh:  make(chan struct{}),
 	}
 
 	key := types.NamespacedName{Namespace: metric.Namespace, Name: metric.Name}
@@ -289,8 +293,6 @@ func (c *customCollection) lastError() error {
 }
 
 // record adds a stat to the current collection.
-func (c *customCollection) record(now time.Time, stat *[]CustomStat) {
-	// Proxied requests have been counted at the activator. Subtract
-	// them to avoid double counting.
+func (c *customCollection) record(now time.Time, stat []CustomStat) {
 	c.stat = stat
 }

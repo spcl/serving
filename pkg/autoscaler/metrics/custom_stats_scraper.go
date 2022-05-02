@@ -59,7 +59,7 @@ func init() {
 type FullStatsScraper interface {
 	// Scrape scrapes the Revision queue metric endpoint. The duration is used
 	// to cutoff young pods, whose stats might skew lower.
-	Scrape(time.Duration) (*[]CustomStat, error)
+	Scrape(time.Duration) ([]CustomStat, error)
 }
 
 // customScrapeClient defines the interface for collecting Revision metrics for a given
@@ -108,7 +108,7 @@ func NewCustomStatsScraper(
 
 // Scrape calls the destination service then sends it
 // to the given stats channel.
-func (s *customServiceScraper) Scrape(window time.Duration) (stat *[]CustomStat, err error) {
+func (s *customServiceScraper) Scrape(window time.Duration) (stat []CustomStat, err error) {
 	startTime := time.Now()
 	defer func() {
 		// No errors and an empty stat? We didn't scrape at all because
@@ -122,7 +122,7 @@ func (s *customServiceScraper) Scrape(window time.Duration) (stat *[]CustomStat,
 	return s.scrapePods(window)
 }
 
-func (s *customServiceScraper) scrapePods(window time.Duration) (*[]CustomStat, error) {
+func (s *customServiceScraper) scrapePods(window time.Duration) ([]CustomStat, error) {
 	pods, youngPods, err := s.podAccessor.PodIPsSplitByAge(window, time.Now())
 	if err != nil {
 		s.logger.Infow("Error querying pods by age", zap.Error(err))
@@ -211,5 +211,5 @@ func (s *customServiceScraper) scrapePods(window time.Duration) (*[]CustomStat, 
 		return nil, errDirectScrapingNotAvailable
 	}
 
-	return &resultArr, nil
+	return resultArr, nil
 }

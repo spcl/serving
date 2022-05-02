@@ -6,6 +6,8 @@ import (
 	"go.uber.org/zap"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/types"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	nv1alpha1 "knative.dev/networking/pkg/apis/networking/v1alpha1"
 	"knative.dev/pkg/logging"
@@ -32,7 +34,8 @@ type Reconciler struct {
 	scaler     *scaler
 	collector  *metrics.FullMetricCollector
 	//deciders   Deciders
-	deciders resources.Deciders
+	deciders   resources.Deciders
+	kubeClient v1.CoreV1Interface
 }
 
 // Check that our Reconciler implements pareconciler.Interface
@@ -46,22 +49,13 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 	logger := logging.FromContext(ctx)
 
 	decider, err := c.reconcileDecider(ctx, pa)
-	// metricKey := types.NamespacedName{Namespace: pa.Namespace, Name: pa.Name}
-	//logger.Infof("Decider wants %d scale", decider.Status.DesiredScale)
-	//logger.Infof("Trying to get metrics for key: %v", metricKey)
-	//stableVal, panicVal, err := c.collector.StableAndPanicConcurrency(metricKey, time.Now())
-	//if err != nil {
-	//	logger.Errorf("Failed to retrieve data from collector, err: %v", err)
-	//} else {
-	//	logger.Infof("stable: %f, panic, %f", stableVal, panicVal)
-	//}
 	desiredScale := decider.Status.DesiredScale
 
 	// Compare the desired and observed resources to determine our situation.
 	podCounter := resourceutil.NewPodAccessor(c.podsLister, pa.Namespace, pa.Labels[serving.RevisionLabelKey])
 	ready, notReady, pending, terminating, err := podCounter.PodCountsByState()
 	if err != nil {
-		return fmt.Errorf("error scaling target: %w", err)
+		return fmt.Errorf("error counting pods: %w", err)
 	}
 
 	if ready >= 1 && !pa.Status.IsScaleTargetInitialized() {
@@ -74,12 +68,19 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 		logger.Warnw("Error retrieving SKS for Scaler", zap.Error(err))
 	}
 
-	want, err := c.scaler.scale(ctx, pa, sks, desiredScale)
-	if err != nil {
-		return fmt.Errorf("error scaling target: %w", err)
+	metricKey := types.NamespacedName{Namespace: pa.Namespace, Name: pa.Name}
+	latestStats, err := c.collector.LatestCustomStats(metricKey)
+	if err == nil && latestStats != nil && len(latestStats) >= 6 {
+		podNames := []string{(latestStats)[1].PodName}
+		err = c.scaler.scaleDownPods(ctx, c.kubeClient, pa, sks, podNames)
+	} else if latestStats == nil || len(latestStats) == 1 {
+		_, err := c.scaler.scale(ctx, pa, sks, desiredScale)
+		if err != nil {
+			return fmt.Errorf("error scaling target: %w", err)
+		}
 	}
 
-	logger.Infof("PPA want %d pods and %d is ready, %d is not ready, %d is pending, %d is terminating", want, ready, notReady, pending, terminating)
+	logger.Infof("PPA: %d is ready, %d is not ready, %d is pending, %d is terminating", ready, notReady, pending, terminating)
 
 	mode := nv1alpha1.SKSOperationModeServe // This could also be proxy (if scale is 0)
 	numActivators := int32(1)               // I guess?

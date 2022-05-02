@@ -19,6 +19,7 @@ package ppa
 import (
 	"context"
 	"fmt"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"net/http"
 	"time"
 
@@ -50,6 +51,10 @@ const (
 	scaleUnknown = -1
 	probePeriod  = 1 * time.Second
 	probeTimeout = 45 * time.Second
+
+	deletionCostAnnotation = "controller.kubernetes.io/pod-deletion-cost"
+	minDeletionCost        = "-2147483647"
+	maxDeletionCost        = "2147483647"
 
 	// The time after which the PA will be re-enqueued.
 	// This number is small, since `handleScaleToZero` below will
@@ -290,7 +295,10 @@ func (ks *scaler) handleScaleToZero(ctx context.Context, pa *autoscalingv1alpha1
 	}
 }
 
-func (ks *scaler) applyScale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler, desiredScale int32,
+func (ks *scaler) applyScale(
+	ctx context.Context,
+	pa *autoscalingv1alpha1.PodAutoscaler,
+	desiredScale int32,
 	ps *autoscalingv1alpha1.PodScalable) error {
 	logger := logging.FromContext(ctx)
 
@@ -310,8 +318,8 @@ func (ks *scaler) applyScale(ctx context.Context, pa *autoscalingv1alpha1.PodAut
 		return err
 	}
 
-	_, err = ks.dynamicClient.Resource(*gvr).Namespace(pa.Namespace).Patch(ctx, ps.Name, types.JSONPatchType,
-		patchBytes, metav1.PatchOptions{})
+	_, err = ks.dynamicClient.Resource(*gvr).Namespace(pa.Namespace).Patch(
+		ctx, ps.Name, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to apply scale %d to scale target %s: %w", desiredScale, name, err)
 	}
@@ -368,4 +376,47 @@ func (ks *scaler) scale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscal
 
 	logger.Infof("Scaling from %d to %d", currentScale, desiredScale)
 	return desiredScale, ks.applyScale(ctx, pa, desiredScale, ps)
+}
+
+func (ks *scaler) scaleDownPods(ctx context.Context, client v1.CoreV1Interface, pa *autoscalingv1alpha1.PodAutoscaler, sks *nv1a1.ServerlessService, podNames []string) error {
+	logger := logging.FromContext(ctx)
+	if len(podNames) <= 0 {
+		return nil
+	}
+
+	podsClient := client.Pods(pa.Namespace)
+	deletedCount := 0
+	for _, podName := range podNames {
+		pod, err := podsClient.Get(ctx, podName, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		newPod := pod.DeepCopy()
+		annotations := newPod.GetAnnotations()
+		if annotations[deletionCostAnnotation] != minDeletionCost {
+			annotations[deletionCostAnnotation] = minDeletionCost
+			patch, err := duck.CreatePatch(pod, newPod)
+			if err != nil {
+				continue
+			}
+			patchBytes, err := patch.MarshalJSON()
+			if err != nil {
+				continue
+			}
+			_, err = podsClient.Patch(ctx, podName, types.JSONPatchType, patchBytes, metav1.PatchOptions{})
+			if err == nil {
+				deletedCount++
+				logger.Infof("Delete pod: %s", podName)
+			}
+		}
+	}
+	if deletedCount > 0 {
+		currentScale := *pa.Status.ActualScale
+		desiredScale := currentScale - int32(deletedCount)
+		pa.Status.DesiredScale = &desiredScale
+		_, err := ks.scale(ctx, pa, sks, desiredScale)
+		return err
+	}
+	return nil
+
 }

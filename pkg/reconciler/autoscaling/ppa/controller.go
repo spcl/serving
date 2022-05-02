@@ -78,6 +78,7 @@ func NewController(
 	// Copied from HPA (hopefully for now)
 	paInformer := painformer.Get(ctx)
 	sksInformer := sksinformer.Get(ctx)
+	kubeClient := kubeclient.Get(ctx).CoreV1()
 	metricInformer := metricinformer.Get(ctx)
 	psInformerFactory := podscalable.Get(ctx)
 	podsInformer := filteredpodinformer.Get(ctx, serving.RevisionUID)
@@ -96,6 +97,7 @@ func NewController(
 		podsLister: podLister,
 		collector:  collector,
 		deciders:   multiScaler,
+		kubeClient: kubeClient,
 	}
 
 	impl := pareconciler.NewImpl(ctx, c, autoscaling.PPA, func(impl *controller.Impl) controller.Options {

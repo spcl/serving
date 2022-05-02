@@ -26,30 +26,25 @@ import (
 )
 
 type Decider struct {
-	logger          *zap.SugaredLogger
-	collector       *asmetrics.FullMetricCollector
-	key             types.NamespacedName
-	currentPodCount int32
+	logger         *zap.SugaredLogger
+	collector      *asmetrics.FullMetricCollector
+	key            types.NamespacedName
+	currentStatLen int
+	runExp         bool // TODO: remove these
 }
 
 func (d *Decider) Scale(logger *zap.SugaredLogger, t time.Time) scaling.ScaleResult {
-	//TODO implement me
-	//val1, val2, err := d.collector.StableAndPanicConcurrency(d.key, t)
-	//if err == nil {
-	//	if val2 > 5 {
-	//		d.currentPodCount++
-	//	} else if val1 <= 2.5 && d.currentPodCount > 1 {
-	//		d.currentPodCount--
-	//	}
-	//	logger.Infof("pod count: %d, (%f, %f)", d.currentPodCount, val1, val2)
-	//} else {
-	//	logger.Infof("pod count: %d, (%v)", d.currentPodCount, err)
-	//}
 	newScale := int32(1) //d.currentPodCount //(int32(t.Minute()/4))%10 + 1
 	stats, err := d.collector.LatestCustomStats(d.key)
-	if err == nil && stats != nil && len(*stats) > 0 {
+	if err == nil && len(stats) > 0 {
 		logger.Infof("Scale based on: %v", stats)
-		newScale = int32(6)
+		if d.runExp || len(stats) != d.currentStatLen {
+			newScale = int32(5)
+			d.runExp = true
+		} else {
+			newScale = int32(6)
+		}
+		d.currentStatLen = len(stats)
 	}
 	return scaling.ScaleResult{
 		DesiredPodCount:     newScale,
@@ -68,18 +63,10 @@ func (d *Decider) Update(spec *scaling.DeciderSpec) {
 func MakeDecider(logger *zap.SugaredLogger, metrics *asmetrics.FullMetricCollector, key types.NamespacedName) *Decider {
 	logger.Info("Created new decider")
 	return &Decider{
-		key:             key,
-		logger:          logger,
-		collector:       metrics,
-		currentPodCount: 1,
+		key:            key,
+		logger:         logger,
+		collector:      metrics,
+		currentStatLen: 1,
+		runExp:         false,
 	}
-}
-
-func (d *Decider) tick(key types.NamespacedName) bool {
-	d.logger.Info("Decider tick")
-	return true
-}
-
-func (d *Decider) getDesiredScale() int32 {
-	return 8
 }
