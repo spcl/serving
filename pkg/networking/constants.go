@@ -34,8 +34,6 @@ const (
 	// by queue-proxy for autoscaler.
 	AutoscalingQueueMetricsPort = 9090
 
-	AutoscalingQueueCustomMetricsPort = 9092
-
 	// UserQueueMetricsPort specifies the port number for metrics emitted
 	// by queue-proxy for end user.
 	UserQueueMetricsPort = 9091

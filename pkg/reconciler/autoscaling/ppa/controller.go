@@ -4,19 +4,21 @@ import (
 	"context"
 	"fmt"
 	"go.uber.org/zap"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
-	network "knative.dev/networking/pkg"
 	networkingclient "knative.dev/networking/pkg/client/injection/client"
 	sksinformer "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/serverlessservice"
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	filteredpodinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/pod/filtered"
+	"knative.dev/pkg/configmap"
+	"knative.dev/pkg/controller"
 	"knative.dev/pkg/logging"
-	"knative.dev/pkg/system"
+	pkgreconciler "knative.dev/pkg/reconciler"
+	"knative.dev/serving/pkg/apis/autoscaling"
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving"
+	"knative.dev/serving/pkg/autoscaler/config/autoscalerconfig"
 	asmetrics "knative.dev/serving/pkg/autoscaler/metrics"
 	"knative.dev/serving/pkg/autoscaler/scaling"
 	servingclient "knative.dev/serving/pkg/client/injection/client"
@@ -25,16 +27,9 @@ import (
 	painformer "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/podautoscaler"
 	pareconciler "knative.dev/serving/pkg/client/injection/reconciler/autoscaling/v1alpha1/podautoscaler"
 	"knative.dev/serving/pkg/deployment"
-	"knative.dev/serving/pkg/reconciler/metric"
-	"knative.dev/serving/pkg/resources"
-
-	"knative.dev/pkg/configmap"
-	"knative.dev/pkg/controller"
-	pkgreconciler "knative.dev/pkg/reconciler"
-	"knative.dev/serving/pkg/apis/autoscaling"
-	"knative.dev/serving/pkg/autoscaler/config/autoscalerconfig"
 	areconciler "knative.dev/serving/pkg/reconciler/autoscaling"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
+	"knative.dev/serving/pkg/reconciler/metric"
 )
 
 type CollectorKey struct{}
@@ -42,17 +37,7 @@ type CollectorKey struct{}
 func WithCollector(ctx context.Context) context.Context {
 	logger := logging.FromContext(ctx)
 	podLister := filteredpodinformer.Get(ctx, serving.RevisionUID).Lister()
-	networkCM, err := kubeclient.Get(ctx).CoreV1().ConfigMaps(system.Namespace()).Get(ctx, network.ConfigName, metav1.GetOptions{})
-	if err != nil {
-		logger.Fatalw("Failed to fetch network config", zap.Error(err))
-	}
-	networkConfig, err := network.NewConfigFromConfigMap(networkCM)
-	if err != nil {
-		logger.Fatalw("Failed to construct network config", zap.Error(err))
-	}
-	collector := asmetrics.NewFullMetricCollector(
-		statsScraperFactoryFunc(podLister, networkConfig.EnableMeshPodAddressability),
-		logger)
+	collector := asmetrics.NewFullMetricCollector(statsScraperFactoryFunc(podLister), logger)
 
 	return context.WithValue(ctx, CollectorKey{}, collector)
 }
@@ -188,7 +173,7 @@ func uniScalerFactoryFunc(collector *asmetrics.FullMetricCollector, logger *zap.
 	}
 }
 
-func statsScraperFactoryFunc(podLister corev1listers.PodLister, usePassthroughLb bool) asmetrics.FullStatsScraperFactory {
+func statsScraperFactoryFunc(podLister corev1listers.PodLister) asmetrics.FullStatsScraperFactory {
 	return func(metric *autoscalingv1alpha1.Metric, logger *zap.SugaredLogger) (asmetrics.FullStatsScraper, error) {
 		if metric.Spec.ScrapeTarget == "" {
 			return nil, nil
@@ -199,7 +184,7 @@ func statsScraperFactoryFunc(podLister corev1listers.PodLister, usePassthroughLb
 			return nil, fmt.Errorf("label %q not found or empty in Metric %s", serving.RevisionLabelKey, metric.Name)
 		}
 
-		podAccessor := resources.NewPodAccessor(podLister, metric.Namespace, revisionName)
-		return asmetrics.NewCustomStatsScraper(metric, revisionName, podAccessor, usePassthroughLb, logger), nil
+		podAccessor := asmetrics.NewCustomPodLister(podLister, metric.Namespace, revisionName)
+		return asmetrics.NewCustomStatsScraper(metric, revisionName, podAccessor, logger), nil
 	}
 }

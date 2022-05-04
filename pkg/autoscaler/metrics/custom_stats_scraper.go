@@ -19,7 +19,9 @@ package metrics
 import (
 	"context"
 	"go.opencensus.io/stats"
-	"knative.dev/serving/pkg/networking"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	corev1listers "k8s.io/client-go/listers/core/v1"
 	"net/http"
 	"strconv"
 	"time"
@@ -33,7 +35,6 @@ import (
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving"
 	"knative.dev/serving/pkg/metrics"
-	"knative.dev/serving/pkg/resources"
 )
 
 var (
@@ -74,12 +75,11 @@ type customScrapeClient interface {
 // https://kubernetes.io/docs/concepts/services-networking/network-policies/
 // for details.
 type customServiceScraper struct {
-	directClient     customScrapeClient
-	statsCtx         context.Context
-	podAccessor      resources.PodAccessor
-	logger           *zap.SugaredLogger
-	host             string
-	usePassthroughLb bool
+	directClient customScrapeClient
+	statsCtx     context.Context
+	podLister    CustomPodLister
+	logger       *zap.SugaredLogger
+	endpoint     string
 }
 
 // NewCustomStatsScraper creates a new StatsScraper for the Revision which
@@ -87,8 +87,7 @@ type customServiceScraper struct {
 func NewCustomStatsScraper(
 	metric *autoscalingv1alpha1.Metric,
 	revisionName string,
-	podAccessor resources.PodAccessor,
-	usePassthroughLb bool,
+	podLister CustomPodLister,
 	logger *zap.SugaredLogger) FullStatsScraper {
 	directClient := newCustomHTTPScrapeClient(client)
 	svcName := metric.Labels[serving.ServiceLabelKey]
@@ -96,13 +95,20 @@ func NewCustomStatsScraper(
 
 	ctx := metrics.RevisionContext(metric.ObjectMeta.Namespace, svcName, cfgName, revisionName)
 
+	annotations := metric.Annotations
+	endpoint := annotations["autoscaling.knative.dev/endpoint"]
+	path := ":" + annotations["autoscaling.knative.dev/port"]
+	if endpoint[0] != '/' {
+		path += "/"
+	}
+	path += endpoint
+
 	return &customServiceScraper{
-		directClient:     directClient,
-		host:             metric.Spec.ScrapeTarget + "." + metric.ObjectMeta.Namespace,
-		podAccessor:      podAccessor,
-		usePassthroughLb: usePassthroughLb,
-		statsCtx:         ctx,
-		logger:           logger,
+		directClient: directClient,
+		endpoint:     path,
+		podLister:    podLister,
+		statsCtx:     ctx,
+		logger:       logger,
 	}
 }
 
@@ -123,7 +129,7 @@ func (s *customServiceScraper) Scrape(window time.Duration) (stat []CustomStat, 
 }
 
 func (s *customServiceScraper) scrapePods(window time.Duration) ([]CustomStat, error) {
-	pods, youngPods, err := s.podAccessor.PodIPsSplitByAge(window, time.Now())
+	pods, youngPods, err := s.podLister.podsSplitByAge(window, time.Now())
 	if err != nil {
 		s.logger.Infow("Error querying pods by age", zap.Error(err))
 		return nil, err
@@ -158,23 +164,18 @@ func (s *customServiceScraper) scrapePods(window time.Duration) ([]CustomStat, e
 				if myIdx >= lp {
 					return errPodsExhausted
 				}
-
-				portAndPath = strconv.Itoa(networking.AutoscalingQueueCustomMetricsPort) + "/custom_metrics"
+				pod := pods[myIdx]
 
 				// Scrape!
-				target := "http://" + pods[myIdx] + ":" + portAndPath
+				target := "http://" + pod.Status.PodIP + s.endpoint
 				req, err := http.NewRequestWithContext(egCtx, http.MethodGet, target, nil)
 				if err != nil {
 					return err
 				}
 
-				if s.usePassthroughLb {
-					req.Host = s.host
-					req.Header.Add("Knative-Direct-Lb", "true")
-				}
-
 				stat, err := s.directClient.Do(req)
 				if err == nil {
+					stat.PodName = pod.Name
 					resultArr[myIdx] = stat
 					succesCount.Inc()
 					return nil
@@ -184,7 +185,7 @@ func (s *customServiceScraper) scrapePods(window time.Duration) ([]CustomStat, e
 					sawNonMeshError.Store(true)
 				}
 
-				s.logger.Infow("Failed scraping pod "+pods[myIdx], zap.Error(err))
+				s.logger.Infow("Failed scraping pod "+pod.Name, zap.Error(err))
 			}
 		})
 	}
@@ -212,4 +213,56 @@ func (s *customServiceScraper) scrapePods(window time.Duration) ([]CustomStat, e
 	}
 
 	return resultArr, nil
+}
+
+type CustomPodLister struct {
+	podsLister corev1listers.PodNamespaceLister
+	selector   labels.Selector
+}
+
+func NewCustomPodLister(lister corev1listers.PodLister, namespace, revisionName string) CustomPodLister {
+	return CustomPodLister{
+		podsLister: lister.Pods(namespace),
+		selector: labels.SelectorFromSet(labels.Set{
+			serving.RevisionLabelKey: revisionName,
+		}),
+	}
+}
+
+// podReady checks whether pod's Ready status is True.
+func podReady(p *v1.Pod) bool {
+	for _, cond := range p.Status.Conditions {
+		if cond.Type == v1.PodReady {
+			return cond.Status == v1.ConditionTrue
+		}
+	}
+	// No ready status, probably not even running.
+	return false
+}
+
+func (c *CustomPodLister) podsSplitByAge(window time.Duration, now time.Time) (older, younger []*v1.Pod, err error) {
+	pods, err := c.podsLister.List(c.selector)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	for _, p := range pods {
+		// Make sure pod is ready
+		if !podReady(p) {
+			continue
+		}
+
+		// Make sure pod is running
+		if !(p.Status.Phase == v1.PodRunning && p.DeletionTimestamp == nil) {
+			continue
+		}
+
+		if now.Sub(p.Status.StartTime.Time) > window {
+			older = append(older, p)
+		} else {
+			younger = append(younger, p)
+		}
+	}
+
+	return older, younger, nil
 }

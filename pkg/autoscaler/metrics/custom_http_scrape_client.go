@@ -18,11 +18,16 @@ package metrics
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
-	"github.com/gogo/protobuf/proto"
 	"io"
 	network "knative.dev/networking/pkg"
 	"net/http"
+)
+
+const (
+	JSONContentType      = "application/json"
+	PlainTextContentType = "text/plain"
 )
 
 type customHTTPScrapeClient struct {
@@ -48,13 +53,13 @@ func (c *customHTTPScrapeClient) Do(req *http.Request) (CustomStat, error) {
 			mightBeMesh: network.IsPotentialMeshErrorResponse(resp),
 		}
 	}
-	if resp.Header.Get("Content-Type") != network.ProtoAcceptContent {
-		return emptyCustomStat, errUnsupportedMetricType
+	if resp.Header.Get("Content-Type") != JSONContentType && resp.Header.Get("Content-Type") != PlainTextContentType {
+		return emptyCustomStat, fmt.Errorf("unsupported Content-Type: %s", resp.Header.Get("Content-Type"))
 	}
-	return customStatFromProto(resp.Body)
+	return customStatFromJSON(resp.Body)
 }
 
-func customStatFromProto(body io.Reader) (CustomStat, error) {
+func customStatFromJSON(body io.Reader) (CustomStat, error) {
 	var stat CustomStat
 	b := pool.Get().(*bytes.Buffer)
 	b.Reset()
@@ -63,11 +68,9 @@ func customStatFromProto(body io.Reader) (CustomStat, error) {
 	if err != nil {
 		return emptyCustomStat, fmt.Errorf("reading body failed: %w", err)
 	}
-	// err = proto.Unmarshal(b.Bytes(), &stat)
-	// err = proto.Unma
-	err = proto.Unmarshal(b.Bytes(), &stat)
+	err = json.Unmarshal(b.Bytes(), &stat)
 	if err != nil {
-		return emptyCustomStat, fmt.Errorf("unmarshalling failed: %w", err)
+		return emptyCustomStat, fmt.Errorf("unmarshalling failed: %w (%s)", err, string(b.Bytes()))
 	}
 	return stat, nil
 }
