@@ -9,6 +9,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 	networkingclient "knative.dev/networking/pkg/client/injection/client"
 	sksinformer "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/serverlessservice"
+	"knative.dev/pkg/apis/duck"
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	filteredpodinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/pod/filtered"
 	"knative.dev/pkg/configmap"
@@ -26,6 +27,7 @@ import (
 	metricinformer "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/metric"
 	painformer "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/podautoscaler"
 	pareconciler "knative.dev/serving/pkg/client/injection/reconciler/autoscaling/v1alpha1/podautoscaler"
+	"knative.dev/serving/pkg/client/listers/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/deployment"
 	areconciler "knative.dev/serving/pkg/reconciler/autoscaling"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
@@ -45,7 +47,7 @@ func WithCollector(ctx context.Context) context.Context {
 func GetCollector(ctx context.Context) *asmetrics.FullMetricCollector {
 	untyped := ctx.Value(CollectorKey{})
 	if untyped == nil {
-		logging.FromContext(ctx).Panic("Unable to fetch collector from context.")
+		logging.FromContext(ctx).Panic("Unable to fetch metrics from context.")
 	}
 	return untyped.(*asmetrics.FullMetricCollector)
 }
@@ -58,9 +60,6 @@ func NewController(
 	logger := logging.FromContext(ctx)
 	logger.Info("Create new PPA controller")
 
-	onlyPPAClass := pkgreconciler.AnnotationFilterFunc(autoscaling.ClassAnnotationKey, autoscaling.PPA, false)
-
-	// Copied from HPA (hopefully for now)
 	paInformer := painformer.Get(ctx)
 	sksInformer := sksinformer.Get(ctx)
 	kubeClient := kubeclient.Get(ctx).CoreV1()
@@ -70,7 +69,10 @@ func NewController(
 	podLister := podsInformer.Lister()
 	collector := GetCollector(ctx)
 
-	multiScaler := scaling.NewMultiScaler(ctx.Done(), uniScalerFactoryFunc(collector, logger), logger)
+	multiScaler := scaling.NewMultiScaler(ctx.Done(),
+		uniScalerFactoryFunc(ctx, collector, logger, psInformerFactory, paInformer.Lister()),
+		logger,
+	)
 
 	c := &Reconciler{
 		Base: &areconciler.Base{
@@ -85,6 +87,7 @@ func NewController(
 		kubeClient: kubeClient,
 	}
 
+	onlyPPAClass := pkgreconciler.AnnotationFilterFunc(autoscaling.ClassAnnotationKey, autoscaling.PPA, false)
 	impl := pareconciler.NewImpl(ctx, c, autoscaling.PPA, func(impl *controller.Impl) controller.Options {
 		logger.Info("Setting up ConfigMap receivers")
 		configsToResync := []interface{}{
@@ -121,14 +124,6 @@ func NewController(
 		}),
 	}
 	sksInformer.Informer().AddEventHandler(handleMatchingControllers)
-	//handleMatchingControllersNoAction := cache.FilteringResourceEventHandler{
-	//	FilterFunc: pkgreconciler.ChainFilterFuncs(onlyPPAClass, onlyPAControlled),
-	//	Handler: controller.HandleAll(func(obj interface{}) {
-	//		logger.Info("metric event")
-	//		impl.EnqueueControllerOf(obj)
-	//	}),
-	//}
-	//metricInformer.Informer().AddEventHandler(handleMatchingControllersNoAction)
 
 	// Watch the knative pods.
 	handlerFunc := impl.EnqueueLabelOfNamespaceScopedResource("", serving.RevisionLabelKey)
@@ -163,13 +158,19 @@ func NewMetricController(
 	return metric.NewCustomController(ctx, cmw, collector)
 }
 
-func uniScalerFactoryFunc(collector *asmetrics.FullMetricCollector, logger *zap.SugaredLogger) scaling.UniScalerFactory {
+func uniScalerFactoryFunc(
+	ctx context.Context,
+	collector *asmetrics.FullMetricCollector,
+	logger *zap.SugaredLogger,
+	psInformer duck.InformerFactory,
+	paLister v1alpha1.PodAutoscalerLister,
+) scaling.UniScalerFactory {
 	return func(decider *scaling.Decider) (scaling.UniScaler, error) {
 		key := types.NamespacedName{
 			Namespace: decider.Namespace,
 			Name:      decider.Name,
 		}
-		return MakeDecider(logger, collector, key), nil
+		return MakeDecider(ctx, logger, collector, key, psInformer, paLister), nil
 	}
 }
 

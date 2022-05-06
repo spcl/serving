@@ -17,56 +17,72 @@ limitations under the License.
 package ppa
 
 import (
+	"context"
 	"go.uber.org/zap"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/tools/cache"
+	"knative.dev/pkg/apis/duck"
 	asmetrics "knative.dev/serving/pkg/autoscaler/metrics"
 	"knative.dev/serving/pkg/autoscaler/scaling"
+	"knative.dev/serving/pkg/client/listers/autoscaling/v1alpha1"
+	"knative.dev/serving/pkg/resources"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 )
 
 type Decider struct {
-	logger         *zap.SugaredLogger
-	collector      *asmetrics.FullMetricCollector
-	key            types.NamespacedName
-	currentStatLen int
-	runExp         bool // TODO: remove these
+	logger        *zap.SugaredLogger
+	metrics       asmetrics.CustomMetricClient
+	key           types.NamespacedName
+	listerFactory func(gvr schema.GroupVersionResource) (cache.GenericLister, error)
+	paLister      v1alpha1.PodAutoscalerLister
 }
 
 func (d *Decider) Scale(logger *zap.SugaredLogger, t time.Time) scaling.ScaleResult {
-	newScale := int32(1) //d.currentPodCount //(int32(t.Minute()/4))%10 + 1
-	stats, err := d.collector.LatestCustomStats(d.key)
+	pa, err := d.paLister.PodAutoscalers(d.key.Namespace).Get(d.key.Name)
+	if err != nil {
+		logger.Errorw("Failed to get pa", zap.Error(err))
+	}
+	ps, err := resources.GetScaleResource(d.key.Namespace, pa.Spec.ScaleTargetRef, d.listerFactory)
+	stats, err := d.metrics.LatestCustomStats(d.key)
+	toDelete := int32(0)
 	if err == nil && len(stats) > 0 {
-		logger.Infof("Scale based on: %v", stats)
-		if d.runExp || len(stats) != d.currentStatLen {
-			newScale = int32(5)
-			d.runExp = true
-		} else {
-			newScale = int32(6)
+		for _, stat := range stats {
+			if stat.CanDownScale {
+				toDelete++
+			}
 		}
-		d.currentStatLen = len(stats)
 	}
 	return scaling.ScaleResult{
-		DesiredPodCount:     newScale,
+		DesiredPodCount:     ps.Status.Replicas - toDelete,
 		ExcessBurstCapacity: 1,
 		ScaleValid:          true,
 	}
 }
 
 func (d *Decider) Update(spec *scaling.DeciderSpec) {
-	d.logger.Warnf("Need to update decider with: %v", spec)
+	d.logger.Debugf("Need to update decider with: %v", spec)
 }
 
-// MakeDecider constructs a Decider resource from a PodAutoscaler taking
-// into account the PA's ContainerConcurrency and the relevant
-// autoscaling annotation.
-func MakeDecider(logger *zap.SugaredLogger, metrics *asmetrics.FullMetricCollector, key types.NamespacedName) *Decider {
-	logger.Info("Created new decider")
+// MakeDecider constructs a Decider resource from a PodAutoscaler
+func MakeDecider(
+	ctx context.Context,
+	logger *zap.SugaredLogger,
+	metrics asmetrics.CustomMetricClient,
+	key types.NamespacedName,
+	psInformerFactory duck.InformerFactory,
+	paLister v1alpha1.PodAutoscalerLister,
+) *Decider {
+	logger.Infof("Created new decider for %v", key)
 	return &Decider{
-		key:            key,
-		logger:         logger,
-		collector:      metrics,
-		currentStatLen: 1,
-		runExp:         false,
+		key:      key,
+		logger:   logger,
+		metrics:  metrics,
+		paLister: paLister,
+		listerFactory: func(gvr schema.GroupVersionResource) (cache.GenericLister, error) {
+			_, l, err := psInformerFactory.Get(ctx, gvr)
+			return l, err
+		},
 	}
 }

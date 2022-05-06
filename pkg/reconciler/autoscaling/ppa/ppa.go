@@ -49,7 +49,6 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 	logger := logging.FromContext(ctx)
 
 	decider, err := c.reconcileDecider(ctx, pa)
-	desiredScale := decider.Status.DesiredScale
 
 	// Compare the desired and observed resources to determine our situation.
 	podCounter := resourceutil.NewPodAccessor(c.podsLister, pa.Namespace, pa.Labels[serving.RevisionLabelKey])
@@ -70,14 +69,14 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 
 	metricKey := types.NamespacedName{Namespace: pa.Namespace, Name: pa.Name}
 	latestStats, err := c.collector.LatestCustomStats(metricKey)
-	if err == nil && latestStats != nil && len(latestStats) >= 6 {
-		podNames := []string{(latestStats)[1].PodName}
-		err = c.scaler.scaleDownPods(ctx, c.kubeClient, pa, sks, podNames)
-	} else if latestStats == nil || len(latestStats) == 1 {
-		_, err := c.scaler.scale(ctx, pa, sks, desiredScale)
-		if err != nil {
-			return fmt.Errorf("error scaling target: %w", err)
+	if err == nil && latestStats != nil {
+		podNames := make([]string, 0)
+		for _, stat := range latestStats {
+			if stat.CanDownScale {
+				podNames = append(podNames, stat.PodName)
+			}
 		}
+		err = c.scaler.scaleDownPods(ctx, c.kubeClient, pa, sks, podNames)
 	}
 
 	logger.Infof("PPA: %d is ready, %d is not ready, %d is pending, %d is terminating", ready, notReady, pending, terminating)
@@ -106,15 +105,9 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 	}
 
 	// Update status
-	pa.Status.DesiredScale = ptr.Int32(desiredScale)
+	pa.Status.DesiredScale = ptr.Int32(decider.Status.DesiredScale)
 	pa.Status.ActualScale = ptr.Int32(int32(ready))
-	if int32(ready) == desiredScale && sks.IsReady() {
-		pa.Status.MarkActive()
-		// logger.Infof("PA (%v) is set to active", pa.Name)
-	} else {
-		pa.Status.MarkActivating("Queued", "Requests to the target are being buffered as resources are provisioned.")
-		// logger.Infof("PA (%v) is set to activating", pa.Name)
-	}
+	pa.Status.MarkActive()
 	return nil
 }
 
@@ -152,10 +145,6 @@ func (c *Reconciler) reconcileDecider(ctx context.Context, pa *autoscalingv1alph
 		if err != nil {
 			return nil, fmt.Errorf("error updating decider: %w", err)
 		}
-	}
-
-	if decider.Status.DesiredScale == -1 {
-		decider.Status.DesiredScale = 1
 	}
 	return decider, nil
 }
