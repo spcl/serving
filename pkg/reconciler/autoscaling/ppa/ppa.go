@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"go.uber.org/zap"
-	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -16,11 +15,9 @@ import (
 	autoscalingv1alpha1 "knative.dev/serving/pkg/apis/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/apis/serving"
 	"knative.dev/serving/pkg/autoscaler/metrics"
-	"knative.dev/serving/pkg/autoscaler/scaling"
 	pareconciler "knative.dev/serving/pkg/client/injection/reconciler/autoscaling/v1alpha1/podautoscaler"
 	areconciler "knative.dev/serving/pkg/reconciler/autoscaling"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
-	"knative.dev/serving/pkg/reconciler/autoscaling/kpa/resources"
 	anames "knative.dev/serving/pkg/reconciler/autoscaling/resources/names"
 	resourceutil "knative.dev/serving/pkg/resources"
 	"time"
@@ -33,8 +30,6 @@ type Reconciler struct {
 	podsLister corev1listers.PodLister
 	scaler     *scaler
 	collector  *metrics.FullMetricCollector
-	//deciders   Deciders
-	deciders   resources.Deciders
 	kubeClient v1.CoreV1Interface
 }
 
@@ -48,7 +43,7 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 
 	logger := logging.FromContext(ctx)
 
-	decider, err := c.reconcileDecider(ctx, pa)
+	// decider, err := c.reconcileDecider(ctx, pa)
 
 	// Compare the desired and observed resources to determine our situation.
 	podCounter := resourceutil.NewPodAccessor(c.podsLister, pa.Namespace, pa.Labels[serving.RevisionLabelKey])
@@ -76,7 +71,11 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 				podNames = append(podNames, stat.PodName)
 			}
 		}
-		err = c.scaler.scaleDownPods(ctx, c.kubeClient, pa, sks, podNames)
+		desiredScale, err := c.scaler.scaleDownPods(ctx, c.kubeClient, pa, sks, podNames)
+		if err != nil {
+			return fmt.Errorf("error deleted pods: %v (%v)", podNames, err)
+		}
+		pa.Status.DesiredScale = ptr.Int32(desiredScale)
 	}
 
 	logger.Infof("PPA: %d is ready, %d is not ready, %d is pending, %d is terminating", ready, notReady, pending, terminating)
@@ -105,7 +104,6 @@ func (c *Reconciler) ReconcileKind(ctx context.Context, pa *autoscalingv1alpha1.
 	}
 
 	// Update status
-	pa.Status.DesiredScale = ptr.Int32(decider.Status.DesiredScale)
 	pa.Status.ActualScale = ptr.Int32(int32(ready))
 	pa.Status.MarkActive()
 	return nil
@@ -124,27 +122,4 @@ func intMax(a, b int32) int32 {
 		return b
 	}
 	return a
-}
-
-func (c *Reconciler) reconcileDecider(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler) (*scaling.Decider, error) {
-	desiredDecider := resources.MakeDecider(pa, config.FromContext(ctx).Autoscaler)
-	decider, err := c.deciders.Get(ctx, desiredDecider.Namespace, desiredDecider.Name)
-	if errors.IsNotFound(err) {
-		decider, err = c.deciders.Create(ctx, desiredDecider)
-		if err != nil {
-			return nil, fmt.Errorf("error creating Decider: %w", err)
-		}
-	} else if err != nil {
-		return nil, fmt.Errorf("error fetching Decider: %w", err)
-	}
-
-	// Ignore status when reconciling
-	desiredDecider.Status = decider.Status
-	if !equality.Semantic.DeepEqual(desiredDecider, decider) {
-		decider, err = c.deciders.Update(ctx, desiredDecider)
-		if err != nil {
-			return nil, fmt.Errorf("error updating decider: %w", err)
-		}
-	}
-	return decider, nil
 }

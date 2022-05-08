@@ -43,6 +43,8 @@ type FullCollector interface {
 	// Watch registers a singleton function to call when a specific collector's status changes.
 	// The passed name is the namespace/name of the metric owned by the respective collector.
 	Watch(func(types.NamespacedName))
+	// Alert registers a singleton function, that is called when the given filter function returns true.
+	Alert(handler func(key types.NamespacedName), filter func([]CustomStat) bool)
 }
 
 type CustomMetricClient interface {
@@ -61,6 +63,22 @@ type FullMetricCollector struct {
 
 	watcherMutex sync.RWMutex
 	watcher      func(types.NamespacedName)
+
+	alertMutex  sync.Mutex
+	alert       func(name types.NamespacedName)
+	alertFilter func(stat []CustomStat) bool
+}
+
+func (c *FullMetricCollector) Alert(handler func(key types.NamespacedName), filter func([]CustomStat) bool) {
+	c.alertMutex.Lock()
+	defer c.alertMutex.Unlock()
+
+	if c.alert != nil {
+		c.logger.Error("Tried to overwrite existing alert. FullCollector supports only a single alert")
+	}
+
+	c.alert = handler
+	c.alertFilter = filter
 }
 
 func (c *FullMetricCollector) LatestCustomStats(key types.NamespacedName) ([]CustomStat, error) {
@@ -102,6 +120,9 @@ func (c *FullMetricCollector) CreateOrUpdate(metric *autoscalingv1alpha1.Metric)
 	if err != nil {
 		return err
 	}
+	if scraper == nil {
+		logger.Warn("Will not collect metrics")
+	}
 	key := types.NamespacedName{Namespace: metric.Namespace, Name: metric.Name}
 
 	c.collectionsMutex.Lock()
@@ -115,8 +136,23 @@ func (c *FullMetricCollector) CreateOrUpdate(metric *autoscalingv1alpha1.Metric)
 		return collection.lastError()
 	}
 
-	c.collections[key] = newCustomCollection(metric, scraper, c.clock, c.Inform, logger)
+	c.collections[key] = newCustomCollection(metric, scraper, c.clock, c.Inform, c.alertCallback, logger)
 	return nil
+}
+
+func (c *FullMetricCollector) alertCallback(stats []CustomStat, event types.NamespacedName) {
+	c.alertMutex.Lock()
+	defer c.alertMutex.Unlock()
+
+	// Check if there is an alert registered
+	if c.alert == nil || c.alertFilter == nil {
+		return
+	}
+
+	// If the filter is true call alert
+	if c.alertFilter(stats) {
+		c.alert(event)
+	}
 }
 
 // Delete deletes a Metric and halts collection.
@@ -175,10 +211,11 @@ type (
 		stat []CustomStat
 
 		// Fields relevant for metric scraping specifically.
-		scraper FullStatsScraper
-		lastErr error
-		grp     sync.WaitGroup
-		stopCh  chan struct{}
+		scraper  FullStatsScraper
+		lastErr  error
+		grp      sync.WaitGroup
+		stopCh   chan struct{}
+		callback func([]CustomStat, types.NamespacedName)
 	}
 )
 
@@ -196,17 +233,13 @@ func (c *customCollection) getScraper() FullStatsScraper {
 
 // newCollection creates a new collection, which uses the given scraper to
 // collect stats every scrapeTickInterval.
-func newCustomCollection(
-	metric *autoscalingv1alpha1.Metric,
-	scraper FullStatsScraper,
-	clock clock.Clock,
-	callback func(types.NamespacedName),
-	logger *zap.SugaredLogger) *customCollection {
+func newCustomCollection(metric *autoscalingv1alpha1.Metric, scraper FullStatsScraper, clock clock.Clock, callback func(types.NamespacedName), recordCallback func(stats []CustomStat, event types.NamespacedName), logger *zap.SugaredLogger) *customCollection {
 	c := &customCollection{
-		metric:  metric,
-		scraper: scraper,
-		stat:    nil,
-		stopCh:  make(chan struct{}),
+		metric:   metric,
+		scraper:  scraper,
+		stat:     nil,
+		stopCh:   make(chan struct{}),
+		callback: recordCallback,
 	}
 
 	key := types.NamespacedName{Namespace: metric.Namespace, Name: metric.Name}
@@ -295,4 +328,5 @@ func (c *customCollection) lastError() error {
 // record adds a stat to the current collection.
 func (c *customCollection) record(now time.Time, stat []CustomStat) {
 	c.stat = stat
+	c.callback(stat, types.NamespacedName{Namespace: c.metric.Namespace, Name: c.metric.Name})
 }

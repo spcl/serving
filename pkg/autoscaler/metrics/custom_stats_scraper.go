@@ -22,6 +22,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	corev1listers "k8s.io/client-go/listers/core/v1"
+	"knative.dev/serving/pkg/apis/autoscaling"
 	"net/http"
 	"strconv"
 	"time"
@@ -96,20 +97,25 @@ func NewCustomStatsScraper(
 	ctx := metrics.RevisionContext(metric.ObjectMeta.Namespace, svcName, cfgName, revisionName)
 
 	annotations := metric.Annotations
-	endpoint := annotations["autoscaling.knative.dev/endpoint"]
-	path := ":" + annotations["autoscaling.knative.dev/port"]
-	if endpoint[0] != '/' {
-		path += "/"
-	}
-	path += endpoint
+	if class, ok := annotations[autoscaling.ClassAnnotationKey]; ok {
+		if class == autoscaling.PPA {
+			endpoint := annotations["autoscaling.knative.dev/endpoint"]
+			path := ":" + annotations["autoscaling.knative.dev/port"]
+			if endpoint[0] != '/' {
+				path += "/"
+			}
+			path += endpoint
 
-	return &customServiceScraper{
-		directClient: directClient,
-		endpoint:     path,
-		podLister:    podLister,
-		statsCtx:     ctx,
-		logger:       logger,
+			return &customServiceScraper{
+				directClient: directClient,
+				endpoint:     path,
+				podLister:    podLister,
+				statsCtx:     ctx,
+				logger:       logger,
+			}
+		}
 	}
+	return nil
 }
 
 // Scrape calls the destination service then sends it

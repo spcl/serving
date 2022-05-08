@@ -4,12 +4,10 @@ import (
 	"context"
 	"fmt"
 	"go.uber.org/zap"
-	"k8s.io/apimachinery/pkg/types"
 	corev1listers "k8s.io/client-go/listers/core/v1"
 	"k8s.io/client-go/tools/cache"
 	networkingclient "knative.dev/networking/pkg/client/injection/client"
 	sksinformer "knative.dev/networking/pkg/client/injection/informers/networking/v1alpha1/serverlessservice"
-	"knative.dev/pkg/apis/duck"
 	kubeclient "knative.dev/pkg/client/injection/kube/client"
 	filteredpodinformer "knative.dev/pkg/client/injection/kube/informers/core/v1/pod/filtered"
 	"knative.dev/pkg/configmap"
@@ -21,13 +19,11 @@ import (
 	"knative.dev/serving/pkg/apis/serving"
 	"knative.dev/serving/pkg/autoscaler/config/autoscalerconfig"
 	asmetrics "knative.dev/serving/pkg/autoscaler/metrics"
-	"knative.dev/serving/pkg/autoscaler/scaling"
 	servingclient "knative.dev/serving/pkg/client/injection/client"
 	"knative.dev/serving/pkg/client/injection/ducks/autoscaling/v1alpha1/podscalable"
 	metricinformer "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/metric"
 	painformer "knative.dev/serving/pkg/client/injection/informers/autoscaling/v1alpha1/podautoscaler"
 	pareconciler "knative.dev/serving/pkg/client/injection/reconciler/autoscaling/v1alpha1/podautoscaler"
-	"knative.dev/serving/pkg/client/listers/autoscaling/v1alpha1"
 	"knative.dev/serving/pkg/deployment"
 	areconciler "knative.dev/serving/pkg/reconciler/autoscaling"
 	"knative.dev/serving/pkg/reconciler/autoscaling/config"
@@ -69,11 +65,6 @@ func NewController(
 	podLister := podsInformer.Lister()
 	collector := GetCollector(ctx)
 
-	multiScaler := scaling.NewMultiScaler(ctx.Done(),
-		uniScalerFactoryFunc(ctx, collector, logger, psInformerFactory, paInformer.Lister()),
-		logger,
-	)
-
 	c := &Reconciler{
 		Base: &areconciler.Base{
 			Client:           servingclient.Get(ctx),
@@ -83,7 +74,6 @@ func NewController(
 		},
 		podsLister: podLister,
 		collector:  collector,
-		deciders:   multiScaler,
 		kubeClient: kubeClient,
 	}
 
@@ -141,10 +131,14 @@ func NewController(
 		}),
 	})
 
-	// Have the Deciders enqueue the PAs whose decisions have changed.
-	multiScaler.Watch(func(k types.NamespacedName) {
-		// logger.Info("Decider queued PPA")
-		impl.EnqueueKey(k)
+	// Enqueue PA if at least one of the pods reported that they can be deleted
+	collector.Alert(impl.EnqueueKey, func(stats []asmetrics.CustomStat) bool {
+		for _, stat := range stats {
+			if stat.CanDownScale {
+				return true
+			}
+		}
+		return false
 	})
 
 	return impl
@@ -156,22 +150,6 @@ func NewMetricController(
 ) *controller.Impl {
 	collector := GetCollector(ctx)
 	return metric.NewCustomController(ctx, cmw, collector)
-}
-
-func uniScalerFactoryFunc(
-	ctx context.Context,
-	collector *asmetrics.FullMetricCollector,
-	logger *zap.SugaredLogger,
-	psInformer duck.InformerFactory,
-	paLister v1alpha1.PodAutoscalerLister,
-) scaling.UniScalerFactory {
-	return func(decider *scaling.Decider) (scaling.UniScaler, error) {
-		key := types.NamespacedName{
-			Namespace: decider.Namespace,
-			Name:      decider.Name,
-		}
-		return MakeDecider(ctx, logger, collector, key, psInformer, paLister), nil
-	}
 }
 
 func statsScraperFactoryFunc(podLister corev1listers.PodLister) asmetrics.FullStatsScraperFactory {

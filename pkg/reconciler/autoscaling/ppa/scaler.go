@@ -329,7 +329,13 @@ func (ks *scaler) applyScale(
 }
 
 // scale attempts to scale the given PA's target reference to the desired scale.
-func (ks *scaler) scale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscaler, sks *nv1a1.ServerlessService, desiredScale int32) (int32, error) {
+func (ks *scaler) scale(
+	ctx context.Context,
+	pa *autoscalingv1alpha1.PodAutoscaler,
+	sks *nv1a1.ServerlessService,
+	ps *autoscalingv1alpha1.PodScalable,
+	desiredScale int32,
+) (int32, error) {
 	asConfig := config.FromContext(ctx).Autoscaler
 	logger := logging.FromContext(ctx)
 
@@ -361,11 +367,6 @@ func (ks *scaler) scale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscal
 		return desiredScale, nil
 	}
 
-	ps, err := resources.GetScaleResource(pa.Namespace, pa.Spec.ScaleTargetRef, ks.listerFactory)
-	if err != nil {
-		return desiredScale, fmt.Errorf("failed to get scale target %v: %w", pa.Spec.ScaleTargetRef, err)
-	}
-
 	currentScale := int32(1)
 	if ps.Spec.Replicas != nil {
 		currentScale = *ps.Spec.Replicas
@@ -378,10 +379,23 @@ func (ks *scaler) scale(ctx context.Context, pa *autoscalingv1alpha1.PodAutoscal
 	return desiredScale, ks.applyScale(ctx, pa, desiredScale, ps)
 }
 
-func (ks *scaler) scaleDownPods(ctx context.Context, client v1.CoreV1Interface, pa *autoscalingv1alpha1.PodAutoscaler, sks *nv1a1.ServerlessService, podNames []string) error {
+func (ks *scaler) scaleDownPods(
+	ctx context.Context,
+	client v1.CoreV1Interface,
+	pa *autoscalingv1alpha1.PodAutoscaler,
+	sks *nv1a1.ServerlessService,
+	podNames []string,
+) (int32, error) {
 	logger := logging.FromContext(ctx)
+	ps, err := resources.GetScaleResource(pa.Namespace, pa.Spec.ScaleTargetRef, ks.listerFactory)
+	if err != nil {
+		return 0, err
+	}
+
+	currentScale := ps.Status.Replicas
+
 	if len(podNames) <= 0 {
-		return nil
+		return currentScale, nil
 	}
 
 	podsClient := client.Pods(pa.Namespace)
@@ -410,13 +424,11 @@ func (ks *scaler) scaleDownPods(ctx context.Context, client v1.CoreV1Interface, 
 			}
 		}
 	}
-	if deletedCount > 0 {
-		currentScale := *pa.Status.ActualScale
-		desiredScale := currentScale - int32(deletedCount)
-		pa.Status.DesiredScale = &desiredScale
-		_, err := ks.scale(ctx, pa, sks, desiredScale)
-		return err
+	if deletedCount <= 0 {
+		return currentScale, nil
 	}
-	return nil
-
+	// currentScale := *pa.Status.ActualScale
+	desiredScale := currentScale - int32(deletedCount)
+	_, err = ks.scale(ctx, pa, sks, ps, desiredScale)
+	return desiredScale, err
 }
