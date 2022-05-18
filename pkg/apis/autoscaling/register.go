@@ -40,6 +40,8 @@ const (
 	KPA = "kpa.autoscaling.knative.dev"
 	// HPA is Kubernetes Horizontal Pod Autoscaler
 	HPA = "hpa.autoscaling.knative.dev"
+	// PPA is PraaS Pod Autoscaler
+	PPA = "ppa.autoscaling.knative.dev"
 
 	// MinScaleAnnotationKey is the annotation to specify the minimum number of Pods
 	// the PodAutoscaler should provision. For example,
