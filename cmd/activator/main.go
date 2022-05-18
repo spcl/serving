@@ -18,6 +18,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"log"
@@ -152,6 +154,36 @@ func main() {
 		logger.Fatalw("Failed to construct network config", zap.Error(err))
 	}
 
+	// Enable TLS against queue-proxy when the CA and SA are specified.
+	tlsEnabled := networkConfig.QueueProxyCA != "" && networkConfig.QueueProxySAN != ""
+
+	// Enable TLS client when queue-proxy-ca is specified.
+	// At this moment activator with TLS does not disable HTTP.
+	// See also https://github.com/knative/serving/issues/12808.
+	if tlsEnabled {
+		caSecret, err := kubeClient.CoreV1().Secrets(system.Namespace()).Get(ctx, networkConfig.QueueProxyCA, metav1.GetOptions{})
+		if err != nil {
+			logger.Fatalw("Failed to get secret", zap.Error(err))
+		}
+
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			pool = x509.NewCertPool()
+		}
+
+		if ok := pool.AppendCertsFromPEM(caSecret.Data["ca.crt"]); !ok {
+			logger.Fatalw("Failed to append ca cert to the RootCAs")
+		}
+
+		tlsConf := &tls.Config{
+			RootCAs:            pool,
+			InsecureSkipVerify: false,
+			ServerName:         networkConfig.QueueProxySAN,
+			MinVersion:         tls.VersionTLS12,
+		}
+		transport = pkgnet.NewProxyAutoTLSTransport(env.MaxIdleProxyConns, env.MaxIdleProxyConnsPerHost, tlsConf)
+	}
+
 	// Start throttler.
 	throttler := activatornet.NewThrottler(ctx, env.PodIP)
 	go throttler.Run(ctx, transport, networkConfig.EnableMeshPodAddressability, networkConfig.MeshCompatibilityMode)
@@ -187,7 +219,7 @@ func main() {
 
 	// Create activation handler chain
 	// Note: innermost handlers are specified first, ie. the last handler in the chain will be executed first
-	ah := activatorhandler.New(ctx, throttler, transport, networkConfig.EnableMeshPodAddressability, logger)
+	ah := activatorhandler.New(ctx, throttler, transport, networkConfig.EnableMeshPodAddressability, logger, tlsEnabled)
 	ah = concurrencyReporter.Handler(ah)
 	ah = activatorhandler.NewTracingHandler(ah)
 	reqLogHandler, err := pkghttp.NewRequestLogHandler(ah, logging.NewSyncFileWriter(os.Stdout), "",
@@ -236,6 +268,31 @@ func main() {
 		go func(name string, s *http.Server) {
 			// Don't forward ErrServerClosed as that indicates we're already shutting down.
 			if err := s.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				errCh <- fmt.Errorf("%s server failed: %w", name, err)
+			}
+		}(name, server)
+	}
+
+	// Enable TLS server when activator-server-cert is specified.
+	// At this moment activator with TLS does not disable HTTP.
+	// See also https://github.com/knative/serving/issues/12808.
+	if networkConfig.ActivatorCertSecret != "" {
+		secret, err := kubeClient.CoreV1().Secrets(system.Namespace()).Get(ctx, networkConfig.ActivatorCertSecret, metav1.GetOptions{})
+		if err != nil {
+			logger.Fatalw("failed to get secret", zap.Error(err))
+		}
+		cert, err := tls.X509KeyPair(secret.Data["tls.crt"], secret.Data["tls.key"])
+		if err != nil {
+			logger.Fatalw("failed to load certs", zap.Error(err))
+		}
+
+		// TODO: Implement the secret (certificate) rotation like knative.dev/pkg/webhook/certificates/.
+		// Also, the current activator must be restarted when updating the secret.
+		name, server := "https", pkgnet.NewServer(":"+strconv.Itoa(networking.BackendHTTPSPort), ah)
+		go func(name string, s *http.Server) {
+			s.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+			// Don't forward ErrServerClosed as that indicates we're already shutting down.
+			if err := s.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				errCh <- fmt.Errorf("%s server failed: %w", name, err)
 			}
 		}(name, server)

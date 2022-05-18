@@ -4,16 +4,6 @@
 aliases:
   api-core-wg-leads:
   - dprotaso
-  autoscaling-reviewers:
-  - nader-ziada
-  - psschwei
-  - skonto
-  - taragu
-  autoscaling-wg-leads:
-  - julz
-  autoscaling-writers:
-  - julz
-  - yanweiguo
   client-reviewers:
   - itsmurugappan
   client-wg-leads:
@@ -54,6 +44,7 @@ aliases:
   - lberk
   eventing-wg-leads:
   - lionelvillard
+  - pierDipi
   eventing-writers:
   - akashrv
   - aliok
@@ -63,20 +54,19 @@ aliases:
   - matzew
   - odacremolbap
   - pierDipi
-  - vaikas
   knative-admin:
   - csantanapr
   - dprotaso
   - evankanderson
-  - ikvmw
+  - gab-satchi
   - itsmurugappan
-  - julz
+  - knative-automation
   - knative-prow-releaser-robot
   - knative-prow-robot
   - knative-prow-updater-robot
   - knative-test-reporter-robot
   - lance
-  - nader-ziada
+  - n3wscott
   - pmorie
   - rhuss
   - smoser-ibm
@@ -84,9 +74,10 @@ aliases:
   - thisisnotapril
   - vaikas
   knative-release-leads:
-  - ikvmw
-  - nader-ziada
+  - dprotaso
+  - gab-satchi
   knative-robots:
+  - knative-automation
   - knative-prow-releaser-robot
   - knative-prow-robot
   - knative-prow-updater-robot
@@ -155,6 +146,7 @@ aliases:
   - shinigambit
   productivity-wg-leads:
   - chizhg
+  - kvmware
   productivity-writers:
   - cardil
   - chaodaiG
@@ -182,9 +174,12 @@ aliases:
   - psschwei
   - skonto
   - whaught
+  serving-wg-leads:
+  - dprotaso
   serving-writers:
   - dprotaso
   - julz
+  - psschwei
   - tcnghia
   - vagababov
   steering-committee:
@@ -197,7 +192,7 @@ aliases:
   technical-oversight-committee:
   - dprotaso
   - evankanderson
-  - julz
+  - n3wscott
   - rhuss
   trademark-committee:
   - evankanderson
